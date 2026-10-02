@@ -1,0 +1,75 @@
+services:
+  backend:
+    build: .
+    container_name: planner-agent-backend
+    command: ["npx", "tsx", "backend/src/server.ts"]
+    ports:
+      - "5001:5001"
+    environment:
+      - PORT=5001
+      - HOST=0.0.0.0
+      - NODE_ENV=development
+      - HOST_HOME=${HOME:-${USERPROFILE:-~}}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - GROQ_API_KEY=${GROQ_API_KEY:-}
+      - OLLAMA_HOST=${OLLAMA_HOST:-http://host.docker.internal:11434}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-gemma4:31b-cloud}
+      - DOCKER=true
+    volumes:
+      - .:/app
+      - /app/node_modules
+      - /app/frontend/node_modules
+      - ${PROJECTS_DIR:-..}:/projects
+      - ${HOME:-${USERPROFILE:-~}}:/host
+      # Mount Docker socket so the agent can run docker commands against the host daemon
+      - /var/run/docker.sock:/var/run/docker.sock
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  frontend:
+    build: .
+    container_name: planner-agent-frontend
+    command: ["npm", "--prefix", "frontend", "run", "dev"]
+    ports:
+      - "5173:5173"
+    environment:
+      - BACKEND_URL=http://localhost:5001
+    volumes:
+      - .:/app
+      - /app/node_modules
+      - /app/frontend/node_modules
+      - ${PROJECTS_DIR:-..}:/projects
+      - ${HOME:-${USERPROFILE:-~}}:/host
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  agent:
+    build: .
+    container_name: planner-agent-cli
+    command: ["npx", "tsx", "src/cli/index.ts"]
+    environment:
+      - HOST_HOME=${HOME:-${USERPROFILE:-~}}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - GROQ_API_KEY=${GROQ_API_KEY:-}
+      - OLLAMA_HOST=${OLLAMA_HOST:-http://host.docker.internal:11434}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-gemma4:31b-cloud}
+      - DOCKER=true
+    volumes:
+      - .:/app
+      - /app/node_modules
+      - /app/frontend/node_modules
+      - ${PROJECTS_DIR:-..}:/projects
+      - ${HOME:-${USERPROFILE:-~}}:/host
+      # Mount Docker socket so the agent can run docker commands against the host daemon
+      - /var/run/docker.sock:/var/run/docker.sock
+    stdin_open: true
+    tty: true
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
