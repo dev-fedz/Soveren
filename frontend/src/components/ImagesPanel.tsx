@@ -30,6 +30,13 @@ export function ImagesPanel({
   const [imageError, setImageError] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
 
+  useEffect(() => {
+    setImageError(false);
+    setImgDimensions(null);
+    setZoom(1);
+    setFitMode('fit');
+  }, [activeImagePath]);
+
   // Normalize image URL
   const imageUrl = activeImagePath
     ? (activeImagePath.startsWith('http') || activeImagePath.startsWith('/images/view') || activeImagePath.startsWith('/artifacts')

@@ -154,9 +154,11 @@ try {
 
 // --- SERVICE DISCOVERY & BROWSER INTEGRATION ---
 
-// Initialize service manager with the active workspace
+// Initialize service manager and workspace context with the active workspace
 if (workspaceManager.isActive() && workspaceManager.getState().path) {
-  serviceManager.setWorkspace(workspaceManager.getState().path);
+  const ws = workspaceManager.getState();
+  serviceManager.setWorkspace(ws.path);
+  WorkspaceContext.setWorkspace(ws.path, ws.name);
 }
 
 // Forward service lifecycle events to all connected clients via Socket.IO
@@ -773,12 +775,23 @@ app.get('/images/view', async (req, res) => {
     const imgPath = req.query.path as string;
     if (!imgPath) return res.status(400).send('Path required');
 
-    const absPath = WorkspaceContext.resolvePath(imgPath);
+    const workspace = workspaceManager.getState();
+    let absPath = WorkspaceContext.resolvePath(imgPath);
+    if (!fsSync.existsSync(absPath)) {
+      if (fsSync.existsSync(imgPath)) {
+        absPath = imgPath;
+      } else if (workspace.path) {
+        const candidate = path.resolve(workspace.path, imgPath);
+        if (fsSync.existsSync(candidate)) {
+          absPath = candidate;
+        }
+      }
+    }
     if (!fsSync.existsSync(absPath)) {
       return res.status(404).send('Image not found');
     }
 
-    const ext = path.extname(imgPath).toLowerCase().replace(/^\./, '');
+    const ext = path.extname(absPath).toLowerCase().replace(/^\./, '');
     const mimeMap: Record<string, string> = {
       png: 'image/png',
       jpg: 'image/jpeg',
@@ -788,6 +801,9 @@ app.get('/images/view', async (req, res) => {
       svg: 'image/svg+xml',
       bmp: 'image/bmp',
       ico: 'image/x-icon',
+      avif: 'image/avif',
+      tiff: 'image/tiff',
+      tif: 'image/tiff',
     };
 
     const contentType = mimeMap[ext] || 'application/octet-stream';
@@ -800,6 +816,46 @@ app.get('/images/view', async (req, res) => {
 });
 
 // --- DOCUMENTS ENDPOINTS ---
+app.get('/documents/raw', async (req, res) => {
+  try {
+    const docPath = req.query.path as string;
+    if (!docPath) return res.status(400).send('Path is required');
+
+    const workspace = workspaceManager.getState();
+    let absPath = WorkspaceContext.resolvePath(docPath);
+    if (!fsSync.existsSync(absPath)) {
+      if (fsSync.existsSync(docPath)) {
+        absPath = docPath;
+      } else if (workspace.path) {
+        const candidate = path.resolve(workspace.path, docPath);
+        if (fsSync.existsSync(candidate)) {
+          absPath = candidate;
+        }
+      }
+    }
+    if (!fsSync.existsSync(absPath)) {
+      return res.status(404).send('Document not found');
+    }
+
+    const ext = path.extname(absPath).toLowerCase().replace(/^\./, '');
+    const mimeMap: Record<string, string> = {
+      pdf: 'application/pdf',
+      csv: 'text/csv',
+      tsv: 'text/tab-separated-values',
+      txt: 'text/plain',
+      doc: 'application/msword',
+      docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      xls: 'application/vnd.ms-excel',
+      xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    };
+    res.setHeader('Content-Type', mimeMap[ext] || 'application/octet-stream');
+    const data = await fs.readFile(absPath);
+    res.send(data);
+  } catch (err: any) {
+    res.status(500).send(err.message);
+  }
+});
+
 app.get('/documents/read', async (req, res) => {
   try {
     const docPath = req.query.path as string;
@@ -807,7 +863,16 @@ app.get('/documents/read', async (req, res) => {
     const page = req.query.page ? parseInt(req.query.page as string, 10) : 1;
     const query = req.query.query as string | undefined;
 
-    const result = await DocumentService.readDocument(docPath, { page, query });
+    const workspace = workspaceManager.getState();
+    let targetPath = docPath;
+    if (!path.isAbsolute(docPath) && workspace.path) {
+      const candidate = path.resolve(workspace.path, docPath);
+      if (fsSync.existsSync(candidate)) {
+        targetPath = candidate;
+      }
+    }
+
+    const result = await DocumentService.readDocument(targetPath, { page, query });
     res.json(result);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -820,7 +885,16 @@ app.get('/documents/search', async (req, res) => {
     const query = req.query.query as string;
     if (!docPath || !query) return res.status(400).json({ error: 'Path and query are required' });
 
-    const result = await DocumentService.searchDocument(docPath, query);
+    const workspace = workspaceManager.getState();
+    let targetPath = docPath;
+    if (!path.isAbsolute(docPath) && workspace.path) {
+      const candidate = path.resolve(workspace.path, docPath);
+      if (fsSync.existsSync(candidate)) {
+        targetPath = candidate;
+      }
+    }
+
+    const result = await DocumentService.searchDocument(targetPath, query);
     res.json(result);
   } catch (err: any) {
     res.status(500).json({ error: err.message });

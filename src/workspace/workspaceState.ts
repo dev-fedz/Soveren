@@ -216,7 +216,7 @@ export class WorkspaceStateManager extends EventEmitter {
       case 'open_inspector': {
         this.state = {
           ...this.state,
-          activeSurface: 'inspect',
+          activeSurface: 'browser',
           activeInspectorPanel: action.panel || 'console',
           activeInspectPanel: action.panel || 'console',
         };
@@ -226,7 +226,7 @@ export class WorkspaceStateManager extends EventEmitter {
       case 'focus_console': {
         this.state = {
           ...this.state,
-          activeSurface: 'inspect',
+          activeSurface: 'browser',
           activeInspectorPanel: 'console',
           activeInspectPanel: 'console',
         };
@@ -236,7 +236,7 @@ export class WorkspaceStateManager extends EventEmitter {
       case 'focus_network': {
         this.state = {
           ...this.state,
-          activeSurface: 'inspect',
+          activeSurface: 'browser',
           activeInspectorPanel: 'network',
           activeInspectPanel: 'network',
         };

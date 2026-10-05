@@ -5,9 +5,11 @@ import { WorkspaceContext } from '../src/context/workspaceContext.js';
 import * as path from 'path';
 import * as fs from 'fs';
 
+import * as os from 'os';
+
 async function runTest() {
   console.log('=== Test Suite 1: Agent Workspace Navigation & File Badges ===');
-  const tempDir = path.join(process.cwd(), '.tmp_test_nav');
+  const tempDir = path.join(os.tmpdir(), 'tmp_test_nav_' + Date.now());
   if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
   WorkspaceContext.setWorkspace(tempDir);
 
@@ -71,9 +73,9 @@ async function runTest() {
   });
 
   state = globalWorkspaceState.getState();
-  if (state.activeSurface !== 'inspect') throw new Error(`Expected activeSurface 'inspect', got ${state.activeSurface}`);
+  if (state.activeSurface !== 'browser') throw new Error(`Expected activeSurface 'browser', got ${state.activeSurface}`);
   if (state.activeInspectPanel !== 'network') throw new Error(`Expected inspect panel 'network', got ${state.activeInspectPanel}`);
-  console.log('✓ open_inspector activated Inspect surface with network panel');
+  console.log('✓ open_inspector kept Browser surface with network panel');
 
   // Action: open_image
   globalWorkspaceState.dispatch({

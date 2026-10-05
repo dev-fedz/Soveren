@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import Editor, { DiffEditor } from '@monaco-editor/react';
 import { io, Socket } from 'socket.io-client';
-import { Send, Code, Globe, Bot, Folder, FolderOpen, Sparkles, Trash2, Sliders, Settings as SettingsIcon, Square, Check, RotateCcw, X, Loader2, Plus, Activity, Image as ImageIcon, FileText, History, Clock, GitCompare, FileCode, MoreVertical } from 'lucide-react';
+import { Send, Code, Globe, Bot, Folder, FolderOpen, Sparkles, Trash2, Sliders, Settings as SettingsIcon, Square, Check, RotateCcw, X, Loader2, Plus, Image as ImageIcon, FileText, History, Clock, GitCompare, FileCode, MoreVertical } from 'lucide-react';
 import axios from 'axios';
 import { MessageRenderer, type ChatMessage } from './components/MessageRenderer';
 import { Explorer, getFileIcon, type ExplorerStatus, type FileNode } from './components/Explorer';
@@ -18,7 +18,6 @@ import { AgentSession, AgentActivity, ChangedFile } from './types/agent';
 import { useWorkspace } from './hooks/useWorkspace';
 import { useBrowserServices, type BrowserTab } from './hooks/useBrowserServices';
 import { BrowserPanel } from './components/BrowserPanel';
-import { InspectPanel } from './components/InspectPanel';
 import { ImagesPanel } from './components/ImagesPanel';
 import { DocsPanel } from './components/DocsPanel';
 import { AgentPermissionModal } from './components/AgentPermissionModal';
@@ -29,18 +28,17 @@ import type {
   WorkspaceAction,
   AgentPermissionRequest,
   AgentArtifact,
-  InspectorPanelType,
-  ConsoleMessage,
-  NetworkRequestLog,
-  DOMNodeInfo,
-  PerformanceMetrics,
-  MemoryMetrics,
-  StorageInspection,
-  SecurityInspection,
 } from './types/workspace';
 
 const SOCKET_URL = 'http://localhost:5001';
 const API = 'http://localhost:5001';
+
+import {
+  IMAGE_EXTENSIONS,
+  DOC_EXTENSIONS,
+  isImageFile,
+  isDocFile,
+} from './constants/fileTypes';
 
 function getLanguageFromPath(filePath: string): string {
   const parts = filePath.split('/');
@@ -295,16 +293,6 @@ export default function AIIDE() {
   const [code, setCode] = useState('// Select a file to view code');
   const [fileName, setFileName] = useState('Welcome');
 
-  // Workspace and Inspect Surface States
-  const [activeInspectPanel, setActiveInspectPanel] = useState<InspectorPanelType>('console');
-  const [consoleLogs, setConsoleLogs] = useState<ConsoleMessage[]>([]);
-  const [networkRequests, setNetworkRequests] = useState<NetworkRequestLog[]>([]);
-  const [domTree, setDomTree] = useState<DOMNodeInfo | null>(null);
-  const [performanceMetrics, setPerformanceMetrics] = useState<PerformanceMetrics | null>(null);
-  const [memoryMetrics, setMemoryMetrics] = useState<MemoryMetrics | null>(null);
-  const [storageInspection, setStorageInspection] = useState<StorageInspection | null>(null);
-  const [securityInspection, setSecurityInspection] = useState<SecurityInspection | null>(null);
-
   // File badges & active explorer path
   const [fileBadges, setFileBadges] = useState<Record<string, 'Created' | 'Modified' | 'Deleted'>>({});
 
@@ -316,12 +304,6 @@ export default function AIIDE() {
 
   // Agent Permission / Human-in-the-loop State
   const [currentPermissionRequest, setCurrentPermissionRequest] = useState<AgentPermissionRequest | null>(null);
-
-  const inspectErrorCount = useMemo(() => {
-    const consoleErrors = consoleLogs.filter((l) => l.level === 'error').length;
-    const networkErrors = networkRequests.filter((r) => r.status && r.status >= 400).length;
-    return consoleErrors + networkErrors;
-  }, [consoleLogs, networkRequests]);
 
   const handlePermissionSubmit = useCallback((requestId: string, values: Record<string, any>) => {
     if (socketRef.current) {
@@ -376,7 +358,18 @@ export default function AIIDE() {
   const [openFilesByWorkspace, setOpenFilesByWorkspace] = useState<Record<string, { tabs: OpenFileTab[]; activePath: string }>>(() => {
     try {
       const saved = localStorage.getItem('ai_ide_open_files');
-      return saved ? JSON.parse(saved) : {};
+      if (!saved) return {};
+      const parsed = JSON.parse(saved);
+      const cleaned: Record<string, { tabs: OpenFileTab[]; activePath: string }> = {};
+      for (const [key, val] of Object.entries(parsed as Record<string, { tabs: OpenFileTab[]; activePath: string }>)) {
+        if (val && Array.isArray(val.tabs)) {
+          cleaned[key] = {
+            tabs: val.tabs.filter((t) => !isImageFile(t.path) && !isDocFile(t.path)),
+            activePath: (isImageFile(val.activePath) || isDocFile(val.activePath)) ? '' : val.activePath,
+          };
+        }
+      }
+      return cleaned;
     } catch {
       return {};
     }
@@ -437,9 +430,8 @@ export default function AIIDE() {
       } else {
         const tabOffsets: Record<string, number> = {
           code: 0.72,
-          browser: 0.78,
-          inspect: 0.84,
-          images: 0.90,
+          browser: 0.80,
+          images: 0.88,
           docs: 0.95,
         };
         targetX = window.innerWidth * (tabOffsets[targetTabOrPos] || 0.75);
@@ -676,6 +668,22 @@ export default function AIIDE() {
 
   // --- File Tab Management ---
   const selectTab = useCallback((filePath: string) => {
+    if (isImageFile(filePath)) {
+      setOpenFiles((prev) => prev.filter((t) => t.path !== filePath));
+      setActiveFilePath(filePath);
+      setActiveImagePath(filePath);
+      setActiveTab('images');
+      setDiffViewFile(null);
+      return;
+    }
+    if (isDocFile(filePath)) {
+      setOpenFiles((prev) => prev.filter((t) => t.path !== filePath));
+      setActiveFilePath(filePath);
+      setActiveDocPath(filePath);
+      setActiveTab('docs');
+      setDiffViewFile(null);
+      return;
+    }
     const tab = openFilesRef.current.find((t) => t.path === filePath);
     if (!tab) return;
     setActiveFilePath(tab.path);
@@ -720,6 +728,32 @@ export default function AIIDE() {
     ) => {
       if (!filePath) return;
       const name = customName || filePath.split('/').pop() || 'file';
+      const ext = (filePath.split('.').pop() || '').toLowerCase();
+
+      // Route image files to Images tab (png, jpeg, jpg, webp, svg, etc.)
+      if (isImageFile(filePath)) {
+        setOpenFiles((prev) => prev.filter((t) => t.path !== filePath));
+        setActiveFilePath(filePath);
+        setActiveImagePath(filePath);
+        if (shouldActivate) {
+          setActiveTab('images');
+          setDiffViewFile(null);
+        }
+        return;
+      }
+
+      // Route document files to Docs tab (pdf, csv, word, xls, xlsx, etc.)
+      if (isDocFile(filePath)) {
+        setOpenFiles((prev) => prev.filter((t) => t.path !== filePath));
+        setActiveFilePath(filePath);
+        setActiveDocPath(filePath);
+        if (shouldActivate) {
+          setActiveTab('docs');
+          setDiffViewFile(null);
+        }
+        return;
+      }
+
       const existingTab = openFilesRef.current.find((t) => t.path === filePath);
 
       if (existingTab) {
@@ -837,28 +871,32 @@ export default function AIIDE() {
     // Workspace state broadcast from backend
     sock.on('agent_workspace_state', (wsState: WorkspaceState) => {
       const surface = wsState.activeSurface;
-      if (surface) {
-        // Only switch away from current non-code surface (browser, inspect, images, docs) to 'code'
-        // if an active file was explicitly opened.
-        // Never kick the user out of the browser or inspector panel unexpectedly!
-        const isCurrentNonCode = activeTabRef.current && activeTabRef.current !== 'code';
-        if (!isCurrentNonCode || surface !== 'code' || Boolean(wsState.activeFilePath)) {
-          setActiveTab(surface);
-        }
-      }
       if (wsState.activeFilePath) {
-        // CRITICAL: Only activate file tab if activeSurface is explicitly 'code' or unspecified.
-        // Never hijack tab away when activeSurface is 'browser', 'inspect', 'images', or 'docs'!
-        const shouldActivateFile = !surface || surface === 'code';
-        openFile(wsState.activeFilePath, undefined, undefined, shouldActivateFile);
+        if (isImageFile(wsState.activeFilePath)) {
+          setActiveFilePath(wsState.activeFilePath);
+          setActiveImagePath(wsState.activeFilePath);
+          setActiveTab('images');
+        } else if (isDocFile(wsState.activeFilePath)) {
+          setActiveFilePath(wsState.activeFilePath);
+          setActiveDocPath(wsState.activeDocPath || wsState.activeFilePath);
+          setActiveTab('docs');
+        } else {
+          const shouldActivateFile = !surface || surface === 'code';
+          openFile(wsState.activeFilePath, undefined, undefined, shouldActivateFile);
+          if (surface && surface !== 'code' && (surface as string) !== 'inspect') {
+            setActiveTab(surface as WorkspaceSurface);
+          }
+        }
+      } else if (surface && (surface as string) !== 'inspect') {
+        const isCurrentNonCode = activeTabRef.current && activeTabRef.current !== 'code';
+        if (!isCurrentNonCode || surface !== 'code') {
+          setActiveTab(surface as WorkspaceSurface);
+        }
       }
       if (wsState.activeBrowserTab) {
         selectBrowserTabRef.current(wsState.activeBrowserTab);
       } else if (surface === 'browser' && wsState.activeBrowserUrl) {
         navigateBrowserTo(wsState.activeBrowserUrl, wsState.activeBrowserService || 'Backend');
-      }
-      if (wsState.activeInspectPanel) {
-        setActiveInspectPanel(wsState.activeInspectPanel as InspectorPanelType);
       }
       if (wsState.activeImagePath) {
         setActiveImagePath(wsState.activeImagePath);
@@ -880,9 +918,18 @@ export default function AIIDE() {
 
     sock.on('agent_workspace_action', (action: WorkspaceAction) => {
       if (action.type === 'open_file' || action.type === 'create_file') {
-        triggerAgentCursor('code', `Opening ${action.target || 'Code'}`);
-        if (action.target) {
-          openFile(action.target, undefined, undefined, true);
+        const target = action.target || '';
+        if (isImageFile(target)) {
+          triggerAgentCursor('images', `Opening ${target}`);
+          openFile(target, undefined, undefined, true);
+        } else if (isDocFile(target)) {
+          triggerAgentCursor('docs', `Opening ${target}`);
+          openFile(target, undefined, undefined, true);
+        } else {
+          triggerAgentCursor('code', `Opening ${target || 'Code'}`);
+          if (target) {
+            openFile(target, undefined, undefined, true);
+          }
         }
       } else if (action.type === 'open_browser') {
         triggerAgentCursor('browser', 'Opening Browser');
@@ -892,18 +939,24 @@ export default function AIIDE() {
           navigateBrowserTo(targetUrl, action.serviceId || 'Backend');
         }
       } else if (action.type === 'open_inspector' || action.type === 'focus_console' || action.type === 'focus_network') {
-        triggerAgentCursor('inspect', 'Opening Inspect');
-        setActiveTab('inspect');
-        if (action.type === 'focus_console') setActiveInspectPanel('console');
-        if (action.type === 'focus_network') setActiveInspectPanel('network');
+        triggerAgentCursor('browser', 'Opening Browser');
+        setActiveTab('browser');
       } else if (action.type === 'open_image') {
         triggerAgentCursor('images', 'Opening Image');
-        setActiveTab('images');
-        if (action.target) setActiveImagePath(action.target);
+        const target = action.target || (action as any).path || '';
+        if (target) {
+          openFile(target, undefined, undefined, true);
+        } else {
+          setActiveTab('images');
+        }
       } else if (action.type === 'open_document') {
         triggerAgentCursor('docs', 'Opening Document');
-        setActiveTab('docs');
-        if (action.target) setActiveDocPath(action.target);
+        const target = action.target || (action as any).path || '';
+        if (target) {
+          openFile(target, undefined, undefined, true);
+        } else {
+          setActiveTab('docs');
+        }
       }
       loadProjectStructure();
     });
@@ -940,45 +993,7 @@ export default function AIIDE() {
       }
     });
 
-    // Inspect telemetry streams
-    sock.on('browser_inspect_console', (msg: ConsoleMessage) => {
-      setConsoleLogs((prev) => [...prev, msg]);
-    });
 
-    sock.on('browser_inspect_network', (req: NetworkRequestLog) => {
-      setNetworkRequests((prev) => [...prev, req]);
-    });
-
-    sock.on('browser_inspect_telemetry', (telemetry: any) => {
-      if (telemetry.domTree) setDomTree(telemetry.domTree);
-      if (telemetry.consoleLogs) setConsoleLogs(telemetry.consoleLogs);
-      if (telemetry.networkRequests) setNetworkRequests(telemetry.networkRequests);
-      if (telemetry.performance) setPerformanceMetrics(telemetry.performance);
-      if (telemetry.memory) setMemoryMetrics(telemetry.memory);
-      if (telemetry.storage) setStorageInspection(telemetry.storage);
-      if (telemetry.security) setSecurityInspection(telemetry.security);
-    });
-
-    // Query pending permission request
-    axios.get(`${API}/agent/permission/pending`).then((res) => {
-      if (res.data?.request) {
-        setCurrentPermissionRequest(res.data.request);
-      }
-    }).catch(() => {});
-
-    // Query initial inspect state
-    axios.get(`${API}/inspect/state`).then((res) => {
-      if (res.data?.success && res.data.state) {
-        const s = res.data.state;
-        if (s.domTree) setDomTree(s.domTree);
-        if (s.consoleLogs) setConsoleLogs(s.consoleLogs);
-        if (s.networkRequests) setNetworkRequests(s.networkRequests);
-        if (s.performance) setPerformanceMetrics(s.performance);
-        if (s.memory) setMemoryMetrics(s.memory);
-        if (s.storage) setStorageInspection(s.storage);
-        if (s.security) setSecurityInspection(s.security);
-      }
-    }).catch(() => {});
 
     // Query recent artifacts
     axios.get(`${API}/artifacts`).then((res) => {
@@ -1092,8 +1107,14 @@ export default function AIIDE() {
         !targetPath.startsWith('https://') &&
         (targetPath.includes('.') || targetPath.includes('/'))
       ) {
-        const shouldActivate = (activity.type === 'editing' || activity.type === 'creating') && (!activeTabRef.current || activeTabRef.current === 'code');
-        openFile(targetPath, undefined, undefined, shouldActivate);
+        if (isImageFile(targetPath)) {
+          openFile(targetPath, undefined, undefined, true);
+        } else if (isDocFile(targetPath)) {
+          openFile(targetPath, undefined, undefined, true);
+        } else {
+          const shouldActivate = (activity.type === 'editing' || activity.type === 'creating') && (!activeTabRef.current || activeTabRef.current === 'code');
+          openFile(targetPath, undefined, undefined, shouldActivate);
+        }
       }
     });
 
@@ -1112,6 +1133,9 @@ export default function AIIDE() {
       // Synchronize open tabs with agent file changes
       for (const cf of changedFiles) {
         const filePath = cf.path;
+        if (isImageFile(filePath) || isDocFile(filePath)) {
+          continue; // Never add image or doc files as open Monaco code tabs
+        }
         const name = cf.path.split('/').pop() || cf.path;
         const content = cf.modifiedContent || '';
 
@@ -1200,9 +1224,6 @@ export default function AIIDE() {
       sock.off('agent_permission_request');
       sock.off('agent_permission_resolved');
       sock.off('agent_artifact_created');
-      sock.off('browser_inspect_console');
-      sock.off('browser_inspect_network');
-      sock.off('browser_inspect_telemetry');
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -1236,11 +1257,18 @@ export default function AIIDE() {
     // Load open files for active workspace
     const cachedTabsObj = openFilesByWorkspace[newKey];
     if (cachedTabsObj && cachedTabsObj.tabs.length > 0) {
-      setOpenFiles(cachedTabsObj.tabs);
-      const active = cachedTabsObj.tabs.find((t) => t.path === cachedTabsObj.activePath) || cachedTabsObj.tabs[0];
-      setActiveFilePath(active.path);
-      setFileName(active.name);
-      setCode(active.content);
+      const validTabs = cachedTabsObj.tabs.filter((t) => !isImageFile(t.path) && !isDocFile(t.path));
+      setOpenFiles(validTabs);
+      const active = validTabs.find((t) => t.path === cachedTabsObj.activePath) || validTabs[0];
+      if (active) {
+        setActiveFilePath(active.path);
+        setFileName(active.name);
+        setCode(active.content);
+      } else {
+        setActiveFilePath('');
+        setFileName('');
+        setCode('// Select a file to view code');
+      }
     } else {
       setOpenFiles([]);
       setActiveFilePath('');
@@ -2782,11 +2810,6 @@ export default function AIIDE() {
                   <Globe size={13} style={{ color: '#4ec9b0' }} />
                   <span>Browser Preview</span>
                 </>
-              ) : activeTab === 'inspect' ? (
-                <>
-                  <Activity size={13} style={{ color: '#e5c07b' }} />
-                  <span>DevTools Inspector</span>
-                </>
               ) : activeTab === 'images' ? (
                 <>
                   <ImageIcon size={13} style={{ color: '#c586c0' }} />
@@ -2822,19 +2845,6 @@ export default function AIIDE() {
             className={`tab-btn ${activeTab === 'browser' ? 'tab-active' : ''}`}
           >
             <Globe size={14} /> Browser
-          </button>
-          <button
-            data-tab="inspect"
-            onClick={() => {
-              setDiffViewFile(null);
-              setActiveTab('inspect');
-            }}
-            className={`tab-btn ${activeTab === 'inspect' ? 'tab-active' : ''}`}
-          >
-            <Activity size={14} /> Inspect
-            {inspectErrorCount > 0 && (
-              <span className="tab-error-badge">{inspectErrorCount}</span>
-            )}
           </button>
           <button
             data-tab="images"
@@ -3056,33 +3066,6 @@ export default function AIIDE() {
               onAddManualTab={addManualBrowserTab}
               onUpdateTabStatus={updateBrowserTabStatus}
               onRefreshServices={refreshBrowserServices}
-            />
-          ) : activeTab === 'inspect' ? (
-            <InspectPanel
-              initialPanel={activeInspectPanel}
-              consoleLogs={consoleLogs}
-              networkRequests={networkRequests}
-              domTree={domTree}
-              performanceMetrics={performanceMetrics}
-              memoryMetrics={memoryMetrics}
-              storageInspection={storageInspection}
-              securityInspection={securityInspection}
-              onClearConsole={() => setConsoleLogs([])}
-              onRefresh={async () => {
-                try {
-                  const res = await axios.get(`${API}/inspect/state`);
-                  if (res.data?.state) {
-                    const s = res.data.state;
-                    if (s.domTree) setDomTree(s.domTree);
-                    if (s.consoleLogs) setConsoleLogs(s.consoleLogs);
-                    if (s.networkRequests) setNetworkRequests(s.networkRequests);
-                    if (s.performance) setPerformanceMetrics(s.performance);
-                    if (s.memory) setMemoryMetrics(s.memory);
-                    if (s.storage) setStorageInspection(s.storage);
-                    if (s.security) setSecurityInspection(s.security);
-                  }
-                } catch {}
-              }}
             />
           ) : activeTab === 'images' ? (
             <ImagesPanel

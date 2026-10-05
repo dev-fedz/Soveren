@@ -35,6 +35,12 @@ export function DocsPanel({ activeDocPath }: DocsPanelProps) {
   const isMarkdown = ext === 'md' || ext === 'markdown';
 
   useEffect(() => {
+    setCurrentPage(1);
+    setSearchQuery('');
+    setSearchMatches([]);
+  }, [activeDocPath]);
+
+  useEffect(() => {
     if (!activeDocPath) return;
 
     let isMounted = true;
@@ -195,8 +201,17 @@ export function DocsPanel({ activeDocPath }: DocsPanelProps) {
           <div className="markdown-doc-view">
             <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
           </div>
+        ) : ext === 'pdf' ? (
+          /* Native PDF Viewer via raw document endpoint */
+          <div className="pdf-doc-view" style={{ width: '100%', height: '100%', flex: 1, minHeight: '400px' }}>
+            <iframe
+              src={`http://localhost:5001/documents/raw?path=${encodeURIComponent(activeDocPath)}`}
+              title={fileName}
+              style={{ width: '100%', height: '100%', border: 'none', background: '#27272a' }}
+            />
+          </div>
         ) : (
-          /* Standard / PDF / Doc Reader */
+          /* Standard / Doc Reader */
           <div className="standard-doc-view">
             <pre className="doc-text-content">{content}</pre>
           </div>

@@ -1,4 +1,4 @@
-export type WorkspaceSurface = 'code' | 'browser' | 'inspect' | 'images' | 'docs';
+export type WorkspaceSurface = 'code' | 'browser' | 'images' | 'docs';
 
 export type InspectorPanelType =
   | 'elements'
