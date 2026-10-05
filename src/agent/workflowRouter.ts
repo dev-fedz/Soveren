@@ -1,6 +1,7 @@
 import { LLMProvider } from '../llm/types.js';
 import { ProviderRegistry } from '../llm/providerRegistry.js';
 import { SettingsManager } from '../config/settingsManager.js';
+import { CredentialStore } from '../config/credentialStore.js';
 import { AgentActivityModel } from './types.js';
 import { OllamaProvider } from '../llm/ollama.js';
 

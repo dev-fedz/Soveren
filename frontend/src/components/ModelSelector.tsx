@@ -82,42 +82,54 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({
           </div>
 
           <div className="model-dropdown-list">
-            {models.map(m => {
-              const isSelected = m.id === activeModelId;
-              const isReady = m.status === 'ready' || m.status === 'connected';
-
-              return (
-                <button
-                  key={m.id}
-                  type="button"
-                  className={`model-option-item ${isSelected ? 'selected' : ''}`}
-                  onClick={() => {
-                    onSelectModel(m.id);
-                    setIsOpen(false);
-                  }}
-                >
-                  <div className="model-option-indicator">
-                    {isSelected ? (
-                      <Check size={14} className="model-check-icon" />
-                    ) : (
-                      <span className={`status-dot ${isReady ? 'ready' : 'offline'}`} />
-                    )}
-                  </div>
-                  <div className="model-option-details">
-                    <div className="model-option-title-row">
-                      <span className="model-option-name">{m.name}</span>
-                      <span className="model-option-ctx">{formatContextSize(m.contextWindow)}</span>
-                    </div>
-                    <div className="model-option-sub">
-                      <span className="model-provider-badge">{m.providerId}</span>
-                      {m.capabilities?.vision && <span className="cap-tag">Vision</span>}
-                      {m.capabilities?.tools && <span className="cap-tag">Tools</span>}
-                      {m.statusMessage && <span className="model-status-note">{m.statusMessage}</span>}
-                    </div>
-                  </div>
-                </button>
+            {(() => {
+              const connectedOnly = models.filter(
+                m => m.status === 'ready' || m.status === 'connected' || m.id === activeModelId
               );
-            })}
+              if (connectedOnly.length === 0) {
+                return (
+                  <div style={{ padding: '16px', textAlign: 'center', fontSize: '12px', color: '#888' }}>
+                    No connected models found.
+                  </div>
+                );
+              }
+              return connectedOnly.map(m => {
+                const isSelected = m.id === activeModelId;
+                const isReady = m.status === 'ready' || m.status === 'connected';
+
+                return (
+                  <button
+                    key={m.id}
+                    type="button"
+                    className={`model-option-item ${isSelected ? 'selected' : ''}`}
+                    onClick={() => {
+                      onSelectModel(m.id);
+                      setIsOpen(false);
+                    }}
+                  >
+                    <div className="model-option-indicator">
+                      {isSelected ? (
+                        <Check size={14} className="model-check-icon" />
+                      ) : (
+                        <span className={`status-dot ${isReady ? 'ready' : 'offline'}`} />
+                      )}
+                    </div>
+                    <div className="model-option-details">
+                      <div className="model-option-title-row">
+                        <span className="model-option-name">{m.name}</span>
+                        <span className="model-option-ctx">{formatContextSize(m.contextWindow)}</span>
+                      </div>
+                      <div className="model-option-sub">
+                        <span className="model-provider-badge">{m.providerId}</span>
+                        {m.capabilities?.vision && <span className="cap-tag">Vision</span>}
+                        {m.capabilities?.tools && <span className="cap-tag">Tools</span>}
+                        {m.statusMessage && <span className="model-status-note">{m.statusMessage}</span>}
+                      </div>
+                    </div>
+                  </button>
+                );
+              });
+            })()}
           </div>
 
           <div className="model-dropdown-footer">

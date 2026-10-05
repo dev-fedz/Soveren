@@ -1,4 +1,5 @@
 import fs from 'fs/promises';
+import { existsSync } from 'fs';
 import path from 'path';
 import os from 'os';
 import { ProviderId } from './types.js';
@@ -6,8 +7,25 @@ import { ProviderId } from './types.js';
 export class CredentialStore {
   private static credentials: Map<ProviderId, string> = new Map();
   private static initialized: boolean = false;
-  private static configDir: string = path.join(os.homedir(), '.ai-native-editor');
-  private static credentialsFile: string = path.join(os.homedir(), '.ai-native-editor', 'credentials.json');
+
+  private static getConfigDir(): string {
+    if (process.env.DOCKER === 'true' || process.env.HOST_HOME) {
+      try {
+        if (existsSync('/host')) {
+          return path.join('/host', '.ai-native-editor');
+        }
+      } catch {}
+    }
+    return path.join(os.homedir(), '.ai-native-editor');
+  }
+
+  private static get configDir(): string {
+    return this.getConfigDir();
+  }
+
+  private static get credentialsFile(): string {
+    return path.join(this.getConfigDir(), 'credentials.json');
+  }
 
   static async initialize(): Promise<void> {
     if (this.initialized) return;

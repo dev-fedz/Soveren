@@ -1,4 +1,5 @@
 import fs from 'fs/promises';
+import { existsSync } from 'fs';
 import path from 'path';
 import os from 'os';
 import {
@@ -463,8 +464,25 @@ export const DEFAULT_CONNECTORS: ConnectorDefinition[] = [
 ];
 
 export class SettingsManager {
-  private static configDir = path.join(os.homedir(), '.ai-native-editor');
-  private static globalSettingsFile = path.join(os.homedir(), '.ai-native-editor', 'settings.json');
+  private static getConfigDir(): string {
+    if (process.env.DOCKER === 'true' || process.env.HOST_HOME) {
+      try {
+        if (existsSync('/host')) {
+          return path.join('/host', '.ai-native-editor');
+        }
+      } catch {}
+    }
+    return path.join(os.homedir(), '.ai-native-editor');
+  }
+
+  private static get configDir(): string {
+    return this.getConfigDir();
+  }
+
+  private static get globalSettingsFile(): string {
+    return path.join(this.getConfigDir(), 'settings.json');
+  }
+
   private static cachedGlobalConfig: AIRuntimeConfig | null = null;
 
   static getDefaultConfig(): AIRuntimeConfig {

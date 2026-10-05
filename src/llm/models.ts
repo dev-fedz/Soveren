@@ -24,6 +24,7 @@ export class ModelCatalog {
     if (!host || ((host.includes('localhost') || host.includes('127.0.0.1')) && process.env.OLLAMA_HOST)) {
       host = process.env.OLLAMA_HOST;
     }
+    host = host || 'http://localhost:11434';
     const now = Date.now();
     // Cache for 15 seconds to avoid spamming local endpoint
     if (this.cachedOllamaModels.length > 0 && now - this.lastOllamaCheck < 15000) {
@@ -110,7 +111,10 @@ export class ModelCatalog {
     const credentials = await CredentialStore.getAllMasked();
     for (const m of combined) {
       if (m.providerId === 'ollama') {
-        m.status = ollamaModels.length > 0 ? 'ready' : 'unavailable';
+        const isRealOllamaModel = ollamaModels.some(
+          om => om.id === m.id || om.id.replace(/^ollama-/, '') === m.id.replace(/^ollama-/, '')
+        );
+        m.status = isRealOllamaModel ? 'ready' : 'unavailable';
       } else if (m.providerId === 'custom') {
         m.status = m.enabled ? 'ready' : 'not_configured';
       } else {

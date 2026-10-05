@@ -283,6 +283,7 @@ export class ProviderRegistry {
         if (!ep || ((ep.includes('localhost') || ep.includes('127.0.0.1')) && process.env.OLLAMA_HOST)) {
           ep = process.env.OLLAMA_HOST;
         }
+        ep = ep || 'http://localhost:11434';
         const res = await fetch(`${ep.replace(/\/$/, '')}/api/tags`, {
           signal: AbortSignal.timeout(3000),
         });

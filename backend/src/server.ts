@@ -800,10 +800,21 @@ app.post('/ai/runtime-config', async (req, res) => {
 
 app.get('/ai/models', async (req, res) => {
   try {
-    const models = await ModelCatalog.getAllModels();
+    const all = await ModelCatalog.getAllModels();
     const config = await SettingsManager.getGlobalConfig();
+    const includeAll = req.query.all === 'true';
+    const models = includeAll
+      ? all
+      : all.filter(m => m.status === 'ready' || m.status === 'connected');
+
+    let activeModel = config.activeModel;
+    if (models.length > 0 && !models.some(m => m.id === activeModel || m.id.replace(/^ollama-/, '') === activeModel?.replace(/^ollama-/, ''))) {
+      const gemmaModel = models.find(m => m.id.includes('gemma4'));
+      activeModel = gemmaModel ? gemmaModel.id : models[0].id;
+    }
+
     res.json({
-      activeModel: config.activeModel,
+      activeModel,
       models,
     });
   } catch (error: any) {

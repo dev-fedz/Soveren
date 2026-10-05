@@ -56,6 +56,7 @@ export const AISettingsModal: React.FC<AISettingsModalProps> = ({
   const [activeModel, setActiveModel] = useState<string>('');
   const [credentials, setCredentials] = useState<Record<string, { hasKey: boolean; maskedKey: string }>>({});
   const [contextUsage, setContextUsage] = useState<any>(null);
+  const [showAllModels, setShowAllModels] = useState(false);
 
   // Skills & Profiles
   const [skills, setSkills] = useState<any[]>([]);
@@ -79,7 +80,9 @@ export const AISettingsModal: React.FC<AISettingsModalProps> = ({
 
   // Sync initial tab when changed externally
   useEffect(() => {
-    if (initialTab) setActiveTab(initialTab);
+    if (initialTab) {
+      setActiveTab(initialTab === 'keys' ? 'providers' : initialTab);
+    }
   }, [initialTab]);
 
   // Load all AI settings data
@@ -88,7 +91,7 @@ export const AISettingsModal: React.FC<AISettingsModalProps> = ({
     try {
       const [configRes, modelsRes, credsRes, ctxRes, skillsRes, toolsRes, pluginsRes, connectorsRes] = await Promise.all([
         axios.get(`${API}/ai/runtime-config${workspacePath ? `?workspace=${encodeURIComponent(workspacePath)}` : ''}`).catch(() => null),
-        axios.get(`${API}/ai/models`).catch(() => null),
+        axios.get(`${API}/ai/models?all=true`).catch(() => null),
         axios.get(`${API}/ai/credentials`).catch(() => null),
         axios.get(`${API}/ai/context-usage${workspacePath ? `?workspace=${encodeURIComponent(workspacePath)}` : ''}`).catch(() => null),
         axios.get(`${API}/ai/skills`).catch(() => null),
@@ -306,10 +309,21 @@ export const AISettingsModal: React.FC<AISettingsModalProps> = ({
 
   if (!isOpen) return null;
 
+  // Determine connected models (connected either locally or via api key)
+  const isModelConnected = (m: any) => {
+    if (m.status === 'ready' || m.status === 'connected') return true;
+    if (m.providerId === 'ollama') return m.status === 'ready';
+    if (m.providerId === 'custom') return Boolean(m.enabled && (m.status === 'ready' || m.status === 'connected'));
+    return Boolean(credentials[m.providerId]?.hasKey);
+  };
+
+  const connectedModels = models.filter(isModelConnected);
+
   // Filter items by search
   const query = searchQuery.toLowerCase().trim();
 
-  const filteredModels = models.filter(m =>
+  const targetModelsList = showAllModels ? models : connectedModels;
+  const filteredModels = targetModelsList.filter(m =>
     !query || m.name.toLowerCase().includes(query) || m.providerId.toLowerCase().includes(query)
   );
 
@@ -390,14 +404,6 @@ export const AISettingsModal: React.FC<AISettingsModalProps> = ({
             </button>
             <button
               type="button"
-              className={`sidebar-tab-btn ${activeTab === 'keys' ? 'active' : ''}`}
-              onClick={() => setActiveTab('keys')}
-            >
-              <Key size={14} />
-              <span>API Keys & Auth</span>
-            </button>
-            <button
-              type="button"
               className={`sidebar-tab-btn ${activeTab === 'context' ? 'active' : ''}`}
               onClick={() => setActiveTab('context')}
             >
@@ -413,7 +419,7 @@ export const AISettingsModal: React.FC<AISettingsModalProps> = ({
               onClick={() => setActiveTab('routing')}
             >
               <Sliders size={14} />
-              <span>Routing & Fallbacks</span>
+              <span>Model Routing</span>
             </button>
 
             <div className="sidebar-group-title">Capabilities</div>
@@ -490,8 +496,16 @@ export const AISettingsModal: React.FC<AISettingsModalProps> = ({
                     <p className="pane-subtitle">Switch active models with zero task loss or configure limits</p>
                   </div>
                   <div className="pane-actions">
-                    <button type="button" className="btn-secondary" onClick={() => setActiveTab('keys')}>
-                      <Key size={13} /> Manage Keys
+                    <button
+                      type="button"
+                      className="btn-secondary"
+                      onClick={() => setShowAllModels(!showAllModels)}
+                      title={showAllModels ? 'Show only models from connected providers' : 'Show all catalog models including unconfigured providers'}
+                    >
+                      {showAllModels ? `Show Connected Only (${connectedModels.length})` : `Show All Catalog (${models.length})`}
+                    </button>
+                    <button type="button" className="btn-secondary" onClick={() => setActiveTab('providers')}>
+                      <Layers size={13} /> Manage Providers
                     </button>
                   </div>
                 </div>
@@ -570,9 +584,113 @@ export const AISettingsModal: React.FC<AISettingsModalProps> = ({
                 <div className="pane-header-row">
                   <div>
                     <h3 className="pane-title">LLM Providers</h3>
-                    <p className="pane-subtitle">Manage endpoints, authentication, and connection health</p>
+                    <p className="pane-subtitle">
+                      Manage endpoints, authentication, and connection health. Keys are securely stored in <code>~/.ai-native-editor/credentials.json</code>.
+                    </p>
                   </div>
                 </div>
+
+                {editingProvider && (
+                  <div className="key-edit-card" style={{ marginBottom: '16px' }}>
+                    <div className="key-edit-header">
+                      <span>
+                        {credentials[editingProvider]?.hasKey ? 'Update API Key for ' : 'Enter API Key for '}
+                        <strong>{(runtimeConfig?.providers?.[editingProvider]?.name || editingProvider).toUpperCase()}</strong>
+                        {credentials[editingProvider]?.hasKey && (
+                          <span style={{ marginLeft: '10px', fontSize: '11px', color: '#98c379', fontWeight: 'normal' }}>
+                            (Current key: <code>{credentials[editingProvider].maskedKey}</code>)
+                          </span>
+                        )}
+                      </span>
+                      <button
+                        type="button"
+                        className="close-mini-btn"
+                        onClick={() => {
+                          setEditingProvider(null);
+                          setApiKeyInput('');
+                          setShowKeyText(false);
+                        }}
+                      >
+                        <X size={14} />
+                      </button>
+                    </div>
+                    <div className="key-input-row">
+                      <div className="key-input-wrapper">
+                        <input
+                          type={showKeyText ? 'text' : 'password'}
+                          name={`api_key_field_${editingProvider}`}
+                          id={`api_key_field_${editingProvider}`}
+                          autoComplete="new-password"
+                          autoCorrect="off"
+                          autoCapitalize="off"
+                          spellCheck={false}
+                          data-lpignore="true"
+                          data-1p-ignore="true"
+                          data-form-type="other"
+                          placeholder={
+                            editingProvider === 'google'
+                              ? 'Paste Google Gemini API key (AIzaSy...)'
+                              : editingProvider === 'anthropic'
+                                ? 'Paste Anthropic API key (sk-ant-...)'
+                                : editingProvider === 'openai'
+                                  ? 'Paste OpenAI API key (sk-proj-...)'
+                                  : editingProvider === 'mistral'
+                                    ? 'Paste Mistral AI API key...'
+                                    : editingProvider === 'xai'
+                                      ? 'Paste xAI Grok API key...'
+                                      : editingProvider === 'openrouter'
+                                        ? 'Paste OpenRouter API key (sk-or-...)'
+                                        : 'Paste API key here...'
+                          }
+                          value={apiKeyInput}
+                          onChange={(e) => setApiKeyInput(e.target.value)}
+                          className="key-text-input"
+                          autoFocus
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' && apiKeyInput.trim()) {
+                              handleSaveApiKey(editingProvider);
+                            }
+                          }}
+                        />
+                        {apiKeyInput && (
+                          <button
+                            type="button"
+                            className="key-clear-btn"
+                            onClick={() => setApiKeyInput('')}
+                            title="Clear input"
+                            style={{
+                              background: 'transparent',
+                              border: 'none',
+                              color: '#888',
+                              cursor: 'pointer',
+                              padding: '0 6px',
+                              display: 'flex',
+                              alignItems: 'center',
+                            }}
+                          >
+                            <X size={13} />
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          className="key-visibility-toggle"
+                          onClick={() => setShowKeyText(!showKeyText)}
+                          title={showKeyText ? 'Hide API key' : 'Show API key'}
+                        >
+                          {showKeyText ? <EyeOff size={14} /> : <Eye size={14} />}
+                        </button>
+                      </div>
+                      <button
+                        type="button"
+                        className="btn-primary"
+                        onClick={() => handleSaveApiKey(editingProvider)}
+                        disabled={!apiKeyInput.trim()}
+                      >
+                        Save Key
+                      </button>
+                    </div>
+                  </div>
+                )}
 
                 <div className="providers-list">
                   {Object.entries(runtimeConfig?.providers || {}).map(([pId, pConf]: [string, any]) => {
@@ -590,6 +708,11 @@ export const AISettingsModal: React.FC<AISettingsModalProps> = ({
                           </div>
                           <div className="provider-endpoint-text">
                             Endpoint: <code>{pConf.endpoint}</code>
+                            {cred?.hasKey && (
+                              <span style={{ marginLeft: '12px', color: '#98c379' }}>
+                                Key: <code className="masked-code" style={{ padding: '1px 6px', fontSize: '11px', background: '#1c1c20', borderRadius: '4px', color: '#9cdcfe' }}>{cred.maskedKey}</code>
+                              </span>
+                            )}
                           </div>
                         </div>
 
@@ -609,21 +732,32 @@ export const AISettingsModal: React.FC<AISettingsModalProps> = ({
                                 type="button"
                                 className="btn-secondary"
                                 onClick={() => {
-                                  setActiveTab('keys');
                                   setEditingProvider(pId);
+                                  setApiKeyInput('');
+                                  setShowKeyText(false);
                                 }}
                               >
                                 {cred?.hasKey ? 'Edit Key' : 'Add Key'}
                               </button>
                               {cred?.hasKey && (
-                                <button
-                                  type="button"
-                                  className="btn-secondary"
-                                  onClick={() => handleTestConnection(pId)}
-                                  disabled={testingConnection === pId}
-                                >
-                                  {testingConnection === pId ? 'Testing...' : 'Test'}
-                                </button>
+                                <>
+                                  <button
+                                    type="button"
+                                    className="btn-secondary"
+                                    onClick={() => handleTestConnection(pId)}
+                                    disabled={testingConnection === pId}
+                                  >
+                                    {testingConnection === pId ? 'Testing...' : 'Test'}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="key-delete-btn"
+                                    onClick={() => handleDeleteApiKey(pId)}
+                                    title="Remove API Key"
+                                  >
+                                    <Trash2 size={13} />
+                                  </button>
+                                </>
                               )}
                             </>
                           )}
@@ -631,128 +765,6 @@ export const AISettingsModal: React.FC<AISettingsModalProps> = ({
                       </div>
                     );
                   })}
-                </div>
-              </div>
-            )}
-
-            {/* 3. API KEYS & AUTH TAB */}
-            {activeTab === 'keys' && (
-              <div className="tab-pane">
-                <div className="pane-header-row">
-                  <div>
-                    <h3 className="pane-title">API Key & Authentication Management</h3>
-                    <p className="pane-subtitle">
-                      Keys are securely stored in <code>~/.ai-native-editor/credentials.json</code> with strict 0o600 OS permissions. Never exported or exposed in prompts.
-                    </p>
-                  </div>
-                </div>
-
-                {editingProvider && (
-                  <div className="key-edit-card">
-                    <div className="key-edit-header">
-                      <span>Enter API Key for <strong>{editingProvider.toUpperCase()}</strong></span>
-                      <button type="button" className="close-mini-btn" onClick={() => setEditingProvider(null)}>
-                        <X size={14} />
-                      </button>
-                    </div>
-                    <div className="key-input-row">
-                      <div className="key-input-wrapper">
-                        <input
-                          type={showKeyText ? 'text' : 'password'}
-                          placeholder="Paste API key here..."
-                          value={apiKeyInput}
-                          onChange={(e) => setApiKeyInput(e.target.value)}
-                          className="key-text-input"
-                        />
-                        <button
-                          type="button"
-                          className="key-visibility-toggle"
-                          onClick={() => setShowKeyText(!showKeyText)}
-                        >
-                          {showKeyText ? <EyeOff size={14} /> : <Eye size={14} />}
-                        </button>
-                      </div>
-                      <button
-                        type="button"
-                        className="btn-primary"
-                        onClick={() => handleSaveApiKey(editingProvider)}
-                        disabled={!apiKeyInput.trim()}
-                      >
-                        Save Key
-                      </button>
-                    </div>
-                  </div>
-                )}
-
-                <div className="keys-table-container">
-                  <table className="keys-table">
-                    <thead>
-                      <tr>
-                        <th>Provider</th>
-                        <th>Status</th>
-                        <th>API Key (Masked)</th>
-                        <th className="text-right">Actions</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {['anthropic', 'openai', 'google', 'mistral', 'xai', 'openrouter'].map(pId => {
-                        const cred = credentials[pId];
-                        const isSet = Boolean(cred?.hasKey);
-
-                        return (
-                          <tr key={pId}>
-                            <td>
-                              <strong className="provider-label">{pId.toUpperCase()}</strong>
-                            </td>
-                            <td>
-                              <span className={`status-pill ${isSet ? 'pill-ready' : 'pill-offline'}`}>
-                                {isSet ? 'Connected' : 'Not configured'}
-                              </span>
-                            </td>
-                            <td>
-                              <code className="masked-code">
-                                {isSet ? cred.maskedKey : '—'}
-                              </code>
-                            </td>
-                            <td className="text-right">
-                              <div className="key-actions-group">
-                                <button
-                                  type="button"
-                                  className="key-table-btn"
-                                  onClick={() => {
-                                    setEditingProvider(pId);
-                                    setApiKeyInput('');
-                                  }}
-                                >
-                                  {isSet ? 'Replace' : 'Add Key'}
-                                </button>
-                                {isSet && (
-                                  <>
-                                    <button
-                                      type="button"
-                                      className="key-table-btn"
-                                      onClick={() => handleTestConnection(pId)}
-                                      disabled={testingConnection === pId}
-                                    >
-                                      {testingConnection === pId ? 'Testing...' : 'Test'}
-                                    </button>
-                                    <button
-                                      type="button"
-                                      className="key-delete-btn"
-                                      onClick={() => handleDeleteApiKey(pId)}
-                                      title="Remove API Key"
-                                    >
-                                      <Trash2 size={13} />
-                                    </button>
-                                  </>
-                                )}
-                              </div>
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
                 </div>
               </div>
             )}
@@ -806,7 +818,7 @@ export const AISettingsModal: React.FC<AISettingsModalProps> = ({
                 </div>
 
                 <div className="settings-section-card">
-                  <h4 className="section-card-title">Context Compaction Strategy (Section 12)</h4>
+                  <h4 className="section-card-title">Context Compaction Strategy</h4>
                   <p className="section-card-desc">
                     When compaction occurs, our engine surgically extracts:
                   </p>
@@ -826,70 +838,85 @@ export const AISettingsModal: React.FC<AISettingsModalProps> = ({
               <div className="tab-pane">
                 <div className="pane-header-row">
                   <div>
-                    <h3 className="pane-title">Model Routing & Fallbacks</h3>
-                    <p className="pane-subtitle">Configure automated model selection and fallback redundancy</p>
+                    <h3 className="pane-title">Model Routing</h3>
+                    <p className="pane-subtitle">Assign specialized AI models to each phase of the autonomous development workflow</p>
                   </div>
                 </div>
 
+                {/* Workflow Model Routing */}
                 <div className="settings-section-card">
-                  <div className="toggle-setting-row">
-                    <div>
-                      <div className="toggle-setting-title">Automatic Model Routing</div>
-                      <div className="toggle-setting-desc">Route tasks to specialized models based on task type</div>
-                    </div>
-                    <input
-                      type="checkbox"
-                      checked={runtimeConfig?.routing?.enabled || false}
-                      onChange={(e) => {
-                        axios.post(`${API}/ai/runtime-config`, {
-                          routing: { ...runtimeConfig?.routing, enabled: e.target.checked },
-                        }).then(() => loadAllData());
-                      }}
-                      className="settings-checkbox"
-                    />
-                  </div>
+                  <h4 className="section-card-title">Multi-Model Workflow Routing</h4>
+                  <p className="section-card-desc">Assign specialized AI models to each phase of the autonomous development workflow:</p>
+                  
+                  <div className="workflow-routing-grid">
+                    {[
+                      { key: 'planningModel', label: '📋 Planning Model', desc: 'Creates task breakdown and step list', def: 'gemma4:31b-cloud' },
+                      { key: 'reasoningModel', label: '🧠 Reasoning Model', desc: 'Analyzes project architecture and failures', def: 'gemma4:31b-cloud' },
+                      { key: 'codingModel', label: '✏ Coding Model', desc: 'Generates and edits code in files', def: 'qwen2.5-coder:7b' },
+                      { key: 'reviewModel', label: '🔍 Review Model', desc: 'Reviews code changes and diff quality', def: 'qwen2.5-coder:7b' },
+                      { key: 'testingModel', label: '🧪 Testing / Debug Model', desc: 'Runs test commands and fixes test errors', def: 'qwen2.5-coder:7b' },
+                    ].map((phase) => {
+                      const currentVal = runtimeConfig?.workflowRouting?.[phase.key] || phase.def;
+                      const cleanCurrentVal = (currentVal || '').replace(/^ollama-/, '');
+                      const cleanDef = phase.def.replace(/^ollama-/, '');
 
-                  <div className="routing-rules-table">
-                    <div className="rule-row">
-                      <span>Code Generation</span>
-                      <ArrowIcon />
-                      <code>claude-3-7-sonnet-20250219</code>
-                    </div>
-                    <div className="rule-row">
-                      <span>Large Codebase Analysis</span>
-                      <ArrowIcon />
-                      <code>gemini-2.5-pro (1M Context)</code>
-                    </div>
-                    <div className="rule-row">
-                      <span>Quick Edits / Conversational</span>
-                      <ArrowIcon />
-                      <code>gpt-4o-mini</code>
-                    </div>
-                    <div className="rule-row">
-                      <span>Offline / Private</span>
-                      <ArrowIcon />
-                      <code>ollama-claude</code>
-                    </div>
+                      // Only models from existing/connected providers (locally or via API key)
+                      const availableForRouting = connectedModels.length > 0 ? connectedModels : models.filter(isModelConnected);
+                      const hasDefaultInList = availableForRouting.some(
+                        (m: any) => m.id.replace(/^ollama-/, '') === cleanDef
+                      );
+
+                      // Match current value cleanly
+                      const matchingModel = availableForRouting.find(
+                        (m: any) => m.id.replace(/^ollama-/, '') === cleanCurrentVal || m.id === currentVal
+                      );
+                      const selectedVal = matchingModel
+                        ? matchingModel.id.replace(/^ollama-/, '')
+                        : cleanCurrentVal;
+
+                      return (
+                        <div key={phase.key} className="workflow-routing-item">
+                          <div className="workflow-routing-label">{phase.label}</div>
+                          <div className="workflow-routing-desc">{phase.desc}</div>
+                          <select
+                            className="workflow-routing-select"
+                            value={selectedVal}
+                            onChange={(e) => {
+                              const newRouting = {
+                                ...(runtimeConfig?.workflowRouting || {}),
+                                [phase.key]: e.target.value,
+                              };
+                              axios
+                                .post(`${API}/ai/workflow-routing`, { routing: newRouting })
+                                .then(() => {
+                                  setActionMessage({ text: `Updated ${phase.label} to ${e.target.value}`, type: 'success' });
+                                  loadAllData();
+                                })
+                                .catch(() => {});
+                            }}
+                          >
+                            {!hasDefaultInList && (
+                              <option value={cleanDef}>{phase.def} (Default)</option>
+                            )}
+                            {availableForRouting.map((m: any) => {
+                              const cleanId = m.id.replace(/^ollama-/, '');
+                              const isDefault = cleanId === cleanDef;
+                              return (
+                                <option key={m.id} value={cleanId}>
+                                  {m.name}{isDefault ? ' (Default)' : ''}
+                                </option>
+                              );
+                            })}
+                          </select>
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
 
+                {/* Agent Change Approval Mode */}
                 <div className="settings-section-card">
-                  <h4 className="section-card-title">Fallback Chain (Section 28)</h4>
-                  <p className="section-card-desc">If primary model is rate-limited or unavailable, fall back sequentially:</p>
-                  <div className="fallback-chain">
-                    <span className="fallback-node primary">1. {activeModel}</span>
-                    <span className="fallback-arrow">→</span>
-                    <span className="fallback-node">2. gpt-4o</span>
-                    <span className="fallback-arrow">→</span>
-                    <span className="fallback-node">3. gemini-2.5-pro</span>
-                    <span className="fallback-arrow">→</span>
-                    <span className="fallback-node">4. ollama-claude</span>
-                  </div>
-                </div>
-
-                {/* Agent Change Approval Mode (Section 40) */}
-                <div className="settings-section-card">
-                  <h4 className="section-card-title">Agent Change Approval (Section 40)</h4>
+                  <h4 className="section-card-title">Agent Change Approval</h4>
                   <p className="section-card-desc">Control how the agent proposes and applies changes to workspace files:</p>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '10px' }}>
                     {[
@@ -948,54 +975,6 @@ export const AISettingsModal: React.FC<AISettingsModalProps> = ({
                               {item.desc}
                             </div>
                           </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-
-                {/* Workflow Model Routing (Sections 44, 46, 47, 59, 60) */}
-                <div className="settings-section-card">
-                  <h4 className="section-card-title">Multi-Model Workflow Routing (Sections 59–60)</h4>
-                  <p className="section-card-desc">Assign specialized AI models to each phase of the autonomous development workflow:</p>
-                  
-                  <div className="workflow-routing-grid">
-                    {[
-                      { key: 'planningModel', label: '📋 Planning Model', desc: 'Creates task breakdown and step list', def: 'gemma4:31b-cloud' },
-                      { key: 'reasoningModel', label: '🧠 Reasoning Model', desc: 'Analyzes project architecture and failures', def: 'gemma4:31b-cloud' },
-                      { key: 'codingModel', label: '✏ Coding Model', desc: 'Generates and edits code in files', def: 'qwen2.5-coder:7b' },
-                      { key: 'reviewModel', label: '🔍 Review Model', desc: 'Reviews code changes and diff quality', def: 'qwen2.5-coder:7b' },
-                      { key: 'testingModel', label: '🧪 Testing / Debug Model', desc: 'Runs test commands and fixes test errors', def: 'qwen2.5-coder:7b' },
-                    ].map((phase) => {
-                      const currentVal = runtimeConfig?.workflowRouting?.[phase.key] || phase.def;
-                      return (
-                        <div key={phase.key} className="workflow-routing-item">
-                          <div className="workflow-routing-label">{phase.label}</div>
-                          <div className="workflow-routing-desc">{phase.desc}</div>
-                          <select
-                            className="workflow-routing-select"
-                            value={currentVal}
-                            onChange={(e) => {
-                              const newRouting = {
-                                ...(runtimeConfig?.workflowRouting || {}),
-                                [phase.key]: e.target.value,
-                              };
-                              axios
-                                .post(`${API}/ai/workflow-routing`, { routing: newRouting })
-                                .then(() => {
-                                  setActionMessage({ text: `Updated ${phase.label} to ${e.target.value}`, type: 'success' });
-                                  loadAllData();
-                                })
-                                .catch(() => {});
-                            }}
-                          >
-                            <option value={phase.def}>{phase.def} (Default)</option>
-                            {models.map((m: any) => (
-                              <option key={m.id} value={m.id}>
-                                {m.name} ({m.provider})
-                              </option>
-                            ))}
-                          </select>
                         </div>
                       );
                     })}
@@ -1222,7 +1201,7 @@ export const AISettingsModal: React.FC<AISettingsModalProps> = ({
                 <div className="pane-header-row">
                   <div>
                     <h3 className="pane-title">Permissions & Security Boundaries</h3>
-                    <p className="pane-subtitle">Section 33: Multi-tier security boundaries between Model and Host System</p>
+                    <p className="pane-subtitle">Multi-tier security boundaries between Model and Host System</p>
                   </div>
                 </div>
 
@@ -1281,7 +1260,7 @@ export const AISettingsModal: React.FC<AISettingsModalProps> = ({
                 <div className="pane-header-row">
                   <div>
                     <h3 className="pane-title">Backup, Export & Reset</h3>
-                    <p className="pane-subtitle">Section 35 & 36: Export settings safely without secrets, or reset categories to default</p>
+                    <p className="pane-subtitle">Export settings safely without secrets, or reset categories to default</p>
                   </div>
                 </div>
 
@@ -1324,7 +1303,3 @@ export const AISettingsModal: React.FC<AISettingsModalProps> = ({
     </div>
   );
 };
-
-const ArrowIcon = () => (
-  <span className="rule-arrow">→</span>
-);
