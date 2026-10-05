@@ -29,7 +29,8 @@ export const DEFAULT_MODELS: ModelProfile[] = [
     inputCost: 3.0,
     outputCost: 15.0,
     enabled: true,
-    status: 'ready',
+    status: 'unavailable',
+    statusMessage: 'API key required',
   },
   {
     id: 'claude-3-5-haiku-20241022',
@@ -42,7 +43,8 @@ export const DEFAULT_MODELS: ModelProfile[] = [
     inputCost: 0.8,
     outputCost: 4.0,
     enabled: true,
-    status: 'ready',
+    status: 'unavailable',
+    statusMessage: 'API key required',
   },
   {
     id: 'gpt-4o',
@@ -55,7 +57,8 @@ export const DEFAULT_MODELS: ModelProfile[] = [
     inputCost: 2.5,
     outputCost: 10.0,
     enabled: true,
-    status: 'ready',
+    status: 'unavailable',
+    statusMessage: 'API key required',
   },
   {
     id: 'gpt-4o-mini',
@@ -68,7 +71,8 @@ export const DEFAULT_MODELS: ModelProfile[] = [
     inputCost: 0.15,
     outputCost: 0.6,
     enabled: true,
-    status: 'ready',
+    status: 'unavailable',
+    statusMessage: 'API key required',
   },
   {
     id: 'o3-mini',
@@ -81,7 +85,8 @@ export const DEFAULT_MODELS: ModelProfile[] = [
     inputCost: 1.1,
     outputCost: 4.4,
     enabled: true,
-    status: 'ready',
+    status: 'unavailable',
+    statusMessage: 'API key required',
   },
   {
     id: 'gemini-3.8-flash-low',
@@ -94,8 +99,8 @@ export const DEFAULT_MODELS: ModelProfile[] = [
     inputCost: 0.15,
     outputCost: 0.6,
     enabled: true,
-    status: 'ready',
-    statusMessage: 'Low reasoning effort • Fast response',
+    status: 'unavailable',
+    statusMessage: 'API key required',
   },
   {
     id: 'gemini-3.8-flash-mid',
@@ -108,8 +113,8 @@ export const DEFAULT_MODELS: ModelProfile[] = [
     inputCost: 0.15,
     outputCost: 0.6,
     enabled: true,
-    status: 'ready',
-    statusMessage: 'Medium reasoning effort • Balanced',
+    status: 'unavailable',
+    statusMessage: 'API key required',
   },
   {
     id: 'gemini-3.8-flash-high',
@@ -122,8 +127,8 @@ export const DEFAULT_MODELS: ModelProfile[] = [
     inputCost: 0.15,
     outputCost: 0.6,
     enabled: true,
-    status: 'ready',
-    statusMessage: 'High reasoning effort • Deep thinking',
+    status: 'unavailable',
+    statusMessage: 'API key required',
   },
   {
     id: 'gemini-3.8-flash',
@@ -136,8 +141,8 @@ export const DEFAULT_MODELS: ModelProfile[] = [
     inputCost: 0.15,
     outputCost: 0.6,
     enabled: true,
-    status: 'ready',
-    statusMessage: 'Dynamic reasoning • General purpose',
+    status: 'unavailable',
+    statusMessage: 'API key required',
   },
   {
     id: 'gemini-2.5-pro',
@@ -150,7 +155,8 @@ export const DEFAULT_MODELS: ModelProfile[] = [
     inputCost: 1.25,
     outputCost: 5.0,
     enabled: true,
-    status: 'ready',
+    status: 'unavailable',
+    statusMessage: 'API key required',
   },
   {
     id: 'gemini-2.0-flash',
@@ -163,7 +169,8 @@ export const DEFAULT_MODELS: ModelProfile[] = [
     inputCost: 0.1,
     outputCost: 0.4,
     enabled: true,
-    status: 'ready',
+    status: 'unavailable',
+    statusMessage: 'API key required',
   },
   {
     id: 'ollama-claude',
@@ -175,7 +182,7 @@ export const DEFAULT_MODELS: ModelProfile[] = [
     inputCost: 0,
     outputCost: 0,
     enabled: true,
-    status: 'ready',
+    status: 'unavailable',
   },
   {
     id: 'custom-model',

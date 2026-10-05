@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import Editor, { DiffEditor } from '@monaco-editor/react';
 import { io, Socket } from 'socket.io-client';
-import { Send, Code, Globe, Bot, Folder, FolderOpen, Sparkles, Trash2, Sliders, Settings as SettingsIcon, Square, Check, RotateCcw, X, Loader2, Plus, Activity, Image as ImageIcon, FileText } from 'lucide-react';
+import { Send, Code, Globe, Bot, Folder, FolderOpen, Sparkles, Trash2, Sliders, Settings as SettingsIcon, Square, Check, RotateCcw, X, Loader2, Plus, Activity, Image as ImageIcon, FileText, History, Clock } from 'lucide-react';
 import axios from 'axios';
 import { MessageRenderer, type ChatMessage } from './components/MessageRenderer';
 import { Explorer, type ExplorerStatus, type FileNode } from './components/Explorer';
@@ -9,7 +9,6 @@ import { WorkspaceIndicator } from './components/WorkspaceIndicator';
 import { DirectoryPicker } from './components/DirectoryPicker';
 import { FormatterModal, type FormatterInfo } from './components/FormatterModal';
 import { FormatterToast, type ToastMessage } from './components/FormatterToast';
-import { ModelSelector } from './components/ModelSelector';
 import { AIRuntimeStatusBar } from './components/AIRuntimeStatusBar';
 import { ContextAlertBanner } from './components/ContextAlertBanner';
 import { AISettingsModal } from './components/AISettingsModal';
@@ -319,6 +318,40 @@ export default function AIIDE() {
       return {};
     }
   });
+
+  // Task History cache per workspace
+  const [tasksByWorkspace, setTasksByWorkspace] = useState<Record<string, {
+    id: string;
+    title: string;
+    timestamp: number;
+    messages: ChatMessage[];
+    workspaceKey: string;
+  }[]>>(() => {
+    try {
+      const saved = localStorage.getItem('ai_ide_task_history');
+      return saved ? JSON.parse(saved) : {};
+    } catch {
+      return {};
+    }
+  });
+  const [isHistoryOpen, setIsHistoryOpen] = useState(false);
+  const historyDropdownRef = useRef<HTMLDivElement>(null);
+
+  const persistTasks = useCallback((updatedTasks: Record<string, any[]>) => {
+    try {
+      localStorage.setItem('ai_ide_task_history', JSON.stringify(updatedTasks));
+    } catch { /* quota exceeded, etc */ }
+  }, []);
+
+  const formatRelativeTime = (ts: number): string => {
+    const diffSec = Math.floor((Date.now() - ts) / 1000);
+    if (diffSec < 60) return 'Just now';
+    const diffMin = Math.floor(diffSec / 60);
+    if (diffMin < 60) return `${diffMin}m ago`;
+    const diffHr = Math.floor(diffMin / 60);
+    if (diffHr < 24) return `${diffHr}h ago`;
+    return new Date(ts).toLocaleDateString([], { month: 'short', day: 'numeric' });
+  };
 
   const prevWorkspaceKeyRef = useRef<string>(getWorkspaceKey(workspace.path));
   const messagesRef = useRef<ChatMessage[]>(messages);
@@ -791,8 +824,43 @@ export default function AIIDE() {
       })
       .catch(() => { });
 
+    // 3. Sync tasks history from backend
+    const wsTasksQuery = workspace.path ? `?workspace=${encodeURIComponent(workspace.path)}` : '?workspace=__global__';
+    axios
+      .get(`${API}/workspace/tasks${wsTasksQuery}`)
+      .then(res => {
+        if (res.data?.tasks && Array.isArray(res.data.tasks)) {
+          setTasksByWorkspace(prev => {
+            const currentList = prev[newKey] || [];
+            const merged = [...currentList];
+            for (const t of res.data.tasks) {
+              if (!merged.some(x => x.id === t.id)) {
+                merged.push(t);
+              }
+            }
+            merged.sort((a, b) => b.timestamp - a.timestamp);
+            const next = { ...prev, [newKey]: merged };
+            persistTasks(next);
+            return next;
+          });
+        }
+      })
+      .catch(() => {});
+
     loadProjectStructure();
-  }, [workspace.path, getWorkspaceKey, loadProjectStructure, persistChats]);
+  }, [workspace.path, getWorkspaceKey, loadProjectStructure, persistChats, persistTasks]);
+
+  // Close Task History dropdown on outside click
+  useEffect(() => {
+    if (!isHistoryOpen) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      if (historyDropdownRef.current && !historyDropdownRef.current.contains(e.target as Node)) {
+        setIsHistoryOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [isHistoryOpen]);
 
   // Auto-scroll chat
   useEffect(() => {
@@ -1126,35 +1194,131 @@ export default function AIIDE() {
   }, [workspace.path, getWorkspaceKey]);
 
   const handleNewAgentSession = useCallback(async () => {
+    const wsKey = getWorkspaceKey(workspace.path);
+
+    // 1. Archive current task to history if there are messages
+    if (messages.length > 0) {
+      const firstUser = messages.find(m => m.role === 'user');
+      const rawTitle = firstUser?.content || messages[0]?.content || 'Task';
+      const cleanTitle = rawTitle.replace(/\n+/g, ' ').trim().slice(0, 50) || 'Untitled Task';
+
+      const savedTask = {
+        id: `task_${Date.now()}`,
+        title: cleanTitle,
+        timestamp: Date.now(),
+        messages: [...messages],
+        workspaceKey: wsKey,
+      };
+
+      setTasksByWorkspace(prev => {
+        const existing = prev[wsKey] || [];
+        const next = { ...prev, [wsKey]: [savedTask, ...existing.filter(t => t.id !== savedTask.id)].slice(0, 50) };
+        persistTasks(next);
+        return next;
+      });
+
+      axios.post(`${API}/workspace/tasks`, {
+        workspace: workspace.path || '__global__',
+        task: savedTask,
+      }).catch(() => {});
+    }
+
+    // 2. Erase the current chat completely
+    setMessages([]);
     setAgentSession(null);
     setDiffViewFile(null);
-    const wsKey = getWorkspaceKey(workspace.path);
-    // Strip activities from current messages and cache so the task is no longer visible in chat
-    setMessages((prev) =>
-      prev.map((msg) => ({
-        ...msg,
-        activities: undefined,
-        changedFiles: undefined,
-      }))
-    );
-    setChatsByWorkspace((prev) => {
-      const currentList = prev[wsKey] || [];
-      const updatedList = currentList.map((msg) => ({
-        ...msg,
-        activities: undefined,
-        changedFiles: undefined,
-      }));
-      const next = { ...prev, [wsKey]: updatedList };
+    setIsHistoryOpen(false);
+
+    setChatsByWorkspace(prev => {
+      const next = { ...prev, [wsKey]: [] };
       persistChats(next);
       return next;
     });
+
     try {
+      await axios.post(`${API}/workspace/chat-history`, {
+        workspace: workspace.path || '__global__',
+        messages: [],
+      });
       await axios.post(`${API}/ai/agent/reset`, { workspace: wsKey });
       const sock = socketRef.current || getSocket();
       sock.emit('new_agent_session', { workspace: wsKey });
     } catch (e) {
       console.error('Failed to reset session:', e);
     }
+  }, [messages, workspace.path, getWorkspaceKey, persistChats, persistTasks]);
+
+  const handleRestoreTask = useCallback((task: any) => {
+    const wsKey = getWorkspaceKey(workspace.path);
+
+    // If current chat has messages and differs from target, auto-archive it first
+    if (messages.length > 0 && messages !== task.messages) {
+      const firstUser = messages.find(m => m.role === 'user');
+      const rawTitle = firstUser?.content || messages[0]?.content || 'Task';
+      const cleanTitle = rawTitle.replace(/\n+/g, ' ').trim().slice(0, 50) || 'Untitled Task';
+      const currentTask = {
+        id: `task_${Date.now()}`,
+        title: cleanTitle,
+        timestamp: Date.now(),
+        messages: [...messages],
+        workspaceKey: wsKey,
+      };
+      setTasksByWorkspace(prev => {
+        const existing = prev[wsKey] || [];
+        if (!existing.some(t => t.title === cleanTitle && t.messages.length === messages.length)) {
+          const next = { ...prev, [wsKey]: [currentTask, ...existing].slice(0, 50) };
+          persistTasks(next);
+          return next;
+        }
+        return prev;
+      });
+    }
+
+    setMessages(task.messages);
+    setAgentSession(null);
+    setDiffViewFile(null);
+    setChatsByWorkspace(prev => {
+      const next = { ...prev, [wsKey]: task.messages };
+      persistChats(next);
+      return next;
+    });
+
+    axios.post(`${API}/workspace/chat-history`, {
+      workspace: workspace.path || '__global__',
+      messages: task.messages,
+    }).catch(() => {});
+
+    setIsHistoryOpen(false);
+  }, [messages, workspace.path, getWorkspaceKey, persistChats, persistTasks]);
+
+  const handleDeleteTask = useCallback((taskId: string) => {
+    const wsKey = getWorkspaceKey(workspace.path);
+    setTasksByWorkspace(prev => {
+      const currentList = prev[wsKey] || [];
+      const next = { ...prev, [wsKey]: currentList.filter(t => t.id !== taskId) };
+      persistTasks(next);
+      return next;
+    });
+    axios.delete(`${API}/workspace/tasks/${encodeURIComponent(taskId)}?workspace=${encodeURIComponent(workspace.path || '__global__')}`).catch(() => {});
+  }, [workspace.path, getWorkspaceKey, persistTasks]);
+
+  const handleClearChat = useCallback(async () => {
+    const wsKey = getWorkspaceKey(workspace.path);
+    setMessages([]);
+    setAgentSession(null);
+    setDiffViewFile(null);
+    setChatsByWorkspace(prev => {
+      const next = { ...prev, [wsKey]: [] };
+      persistChats(next);
+      return next;
+    });
+    try {
+      await axios.post(`${API}/workspace/chat-history`, {
+        workspace: workspace.path || '__global__',
+        messages: [],
+      });
+      await axios.post(`${API}/ai/agent/reset`, { workspace: wsKey });
+    } catch { /* ignore */ }
   }, [workspace.path, getWorkspaceKey, persistChats]);
 
   // When workspace changes, query or clear session specifically for that workspace
@@ -1357,10 +1521,11 @@ export default function AIIDE() {
           <button
             type="button"
             className="panel-header-settings-btn"
-            onClick={() => handleOpenAISettings('models')}
+            onClick={() => handleOpenAISettings('routing')}
             title="Open AI Control Center & Settings"
+            aria-label="Open AI Settings"
           >
-            <SettingsIcon size={15} />
+            <SettingsIcon size={16} color="#ffffff" />
           </button>
         </div>
 
@@ -1408,42 +1573,111 @@ export default function AIIDE() {
             )}
           </div>
           <div className="chat-scope-actions">
-            {(isCurrentWorkspaceSession || messages.some((m) => (m.activities && m.activities.length > 0) || (m.changedFiles && m.changedFiles.length > 0))) && (
-              <button
-                className="chat-new-task-btn"
-                title="Start a new task (clears previous task from view)"
-                onClick={handleNewAgentSession}
-              >
-                <Plus size={12} />
-                <span>New Task</span>
-              </button>
-            )}
+            {/* History Button */}
+            <button
+              type="button"
+              className={`chat-history-btn ${isHistoryOpen ? 'active' : ''}`}
+              title="Task History (Load previous tasks)"
+              onClick={() => setIsHistoryOpen(prev => !prev)}
+            >
+              <History size={12} />
+              <span>History</span>
+              {(tasksByWorkspace[getWorkspaceKey(workspace.path)] || []).length > 0 && (
+                <span className="task-count-badge">
+                  {(tasksByWorkspace[getWorkspaceKey(workspace.path)] || []).length}
+                </span>
+              )}
+            </button>
+
+            {/* New Task Button */}
+            <button
+              type="button"
+              className="chat-new-task-btn"
+              title="Start a new task (archives current task to history and clears chat)"
+              onClick={handleNewAgentSession}
+            >
+              <Plus size={12} />
+              <span>New Task</span>
+            </button>
+
+            {/* Clear Button */}
             {messages.length > 0 && (
               <button
+                type="button"
                 className="chat-clear-btn"
-                title="Clear this conversation"
-                onClick={() => {
-                  const key = getWorkspaceKey(workspace.path);
-                  setMessages([]);
-                  setAgentSession(null);
-                  setDiffViewFile(null);
-                  setChatsByWorkspace(prev => {
-                    const next = { ...prev, [key]: [] };
-                    persistChats(next);
-                    return next;
-                  });
-                  axios.post(`${API}/workspace/chat-history`, {
-                    workspace: workspace.path || '__global__',
-                    messages: [],
-                  }).catch(() => { });
-                  axios.post(`${API}/ai/agent/reset`, { workspace: key }).catch(() => { });
-                }}
+                title="Clear current conversation"
+                onClick={handleClearChat}
               >
-                <Trash2 size={13} />
+                <Trash2 size={12} />
                 <span>Clear</span>
               </button>
             )}
           </div>
+
+          {/* Task History Dropdown Menu */}
+          {isHistoryOpen && (
+            <div className="task-history-dropdown" ref={historyDropdownRef}>
+              <div className="task-history-header">
+                <div className="task-history-title">
+                  <History size={13} className="text-amber" />
+                  <span>Task History</span>
+                  <span className="task-history-badge">
+                    {(tasksByWorkspace[getWorkspaceKey(workspace.path)] || []).length}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  className="task-history-close-btn"
+                  onClick={() => setIsHistoryOpen(false)}
+                  title="Close History"
+                >
+                  <X size={13} />
+                </button>
+              </div>
+
+              <div className="task-history-list">
+                {(tasksByWorkspace[getWorkspaceKey(workspace.path)] || []).length === 0 ? (
+                  <div className="task-history-empty">
+                    <Clock size={24} className="task-history-empty-icon" />
+                    <p className="task-history-empty-text">No previous tasks yet</p>
+                    <span className="task-history-empty-sub">
+                      Tasks are automatically archived here when you click "+ New Task".
+                    </span>
+                  </div>
+                ) : (
+                  (tasksByWorkspace[getWorkspaceKey(workspace.path)] || []).map((task) => (
+                    <div
+                      key={task.id}
+                      className="task-history-item"
+                      onClick={() => handleRestoreTask(task)}
+                      title={`Load previous task: ${task.title}`}
+                    >
+                      <div className="task-history-item-content">
+                        <div className="task-history-item-title">{task.title}</div>
+                        <div className="task-history-item-meta">
+                          <span className="task-history-item-time">{formatRelativeTime(task.timestamp)}</span>
+                          <span className="task-history-item-count">
+                            {task.messages.length} msg{task.messages.length === 1 ? '' : 's'}
+                          </span>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        className="task-history-item-del-btn"
+                        title="Delete task from history"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleDeleteTask(task.id);
+                        }}
+                      >
+                        <Trash2 size={12} />
+                      </button>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Chat */}
@@ -1635,15 +1869,6 @@ export default function AIIDE() {
           )}
 
           <div className="tab-spacer" />
-
-          {/* Model Selector in Tab Bar */}
-          <ModelSelector
-            activeModelId={activeModelId}
-            models={availableModels}
-            onSelectModel={handleSelectModel}
-            onOpenSettings={handleOpenAISettings}
-            contextPercentage={contextUsage?.percentage || 0}
-          />
 
           <button
             data-tab="code"

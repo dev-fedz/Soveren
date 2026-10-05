@@ -55,6 +55,30 @@ body {
   margin: 0;
 }
 
+.panel-header-settings-btn {
+  margin-left: auto;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: #ffffff;
+  cursor: pointer;
+  padding: 6px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background-color 0.15s ease, color 0.15s ease, transform 0.15s ease;
+}
+
+.panel-header-settings-btn:hover {
+  background: rgba(255, 255, 255, 0.12);
+  color: #ffffff;
+}
+
+.panel-header-settings-btn:active {
+  transform: scale(0.95);
+}
+
 /* === WORKSPACE INDICATOR === */
 .workspace-indicator {
   padding: 8px 16px;
@@ -491,6 +515,39 @@ body {
   border-color: #61afef;
 }
 
+.chat-history-btn {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: #cccccc;
+  font-size: 11px;
+  cursor: pointer;
+  padding: 2px 8px;
+  border-radius: 4px;
+  transition: all 0.15s ease;
+  font-weight: 500;
+}
+
+.chat-history-btn:hover,
+.chat-history-btn.active {
+  background: rgba(229, 192, 123, 0.15);
+  color: #e5c07b;
+  border-color: rgba(229, 192, 123, 0.4);
+}
+
+.task-count-badge {
+  background: rgba(229, 192, 123, 0.25);
+  color: #e5c07b;
+  font-size: 9px;
+  font-weight: 700;
+  padding: 0 4px;
+  border-radius: 8px;
+  min-width: 14px;
+  text-align: center;
+}
+
 .chat-clear-btn {
   display: flex;
   align-items: center;
@@ -507,6 +564,187 @@ body {
 
 .chat-clear-btn:hover {
   background: #333333;
+  color: #f48771;
+}
+
+/* === TASK HISTORY DROPDOWN === */
+.task-history-dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 12px;
+  width: 320px;
+  background: #1e1e1e;
+  border: 1px solid #3c3c3c;
+  border-radius: 8px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.65);
+  z-index: 1000;
+  overflow: hidden;
+  animation: fadeInTaskDropdown 0.15s ease-out;
+}
+
+@keyframes fadeInTaskDropdown {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.task-history-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  background: #252526;
+  border-bottom: 1px solid #333333;
+}
+
+.task-history-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #e0e0e0;
+}
+
+.task-history-badge {
+  font-size: 10px;
+  background: #333333;
+  color: #aaaaaa;
+  padding: 1px 6px;
+  border-radius: 10px;
+}
+
+.task-history-close-btn {
+  background: transparent;
+  border: none;
+  color: #888888;
+  cursor: pointer;
+  padding: 2px;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.task-history-close-btn:hover {
+  color: #ffffff;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.task-history-list {
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.task-history-empty {
+  padding: 28px 16px;
+  text-align: center;
+  color: #888888;
+}
+
+.task-history-empty-icon {
+  margin: 0 auto 8px;
+  opacity: 0.4;
+  color: #e5c07b;
+}
+
+.task-history-empty-text {
+  font-size: 12px;
+  font-weight: 500;
+  color: #cccccc;
+  margin: 0 0 4px;
+}
+
+.task-history-empty-sub {
+  font-size: 11px;
+  color: #777777;
+  line-height: 1.4;
+  display: block;
+}
+
+.task-history-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border-bottom: 1px solid #282828;
+  cursor: pointer;
+  transition: background-color 0.12s ease;
+}
+
+.task-history-item:last-child {
+  border-bottom: none;
+}
+
+.task-history-item:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.task-history-item-content {
+  flex: 1;
+  min-width: 0;
+  padding-right: 8px;
+}
+
+.task-history-item-title {
+  font-size: 12px;
+  font-weight: 500;
+  color: #e0e0e0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-bottom: 2px;
+}
+
+.task-history-item:hover .task-history-item-title {
+  color: #61afef;
+}
+
+.task-history-item-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 10px;
+  color: #777777;
+}
+
+.task-history-item-time {
+  color: #888888;
+}
+
+.task-history-item-count {
+  background: rgba(97, 175, 239, 0.1);
+  color: #61afef;
+  padding: 0 5px;
+  border-radius: 4px;
+  font-weight: 500;
+}
+
+.task-history-item-del-btn {
+  background: transparent;
+  border: none;
+  color: #666666;
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0.6;
+  transition: all 0.15s ease;
+}
+
+.task-history-item:hover .task-history-item-del-btn {
+  opacity: 1;
+}
+
+.task-history-item-del-btn:hover {
+  background: rgba(244, 135, 113, 0.15);
   color: #f48771;
 }
 

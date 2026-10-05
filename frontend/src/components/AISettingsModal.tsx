@@ -41,7 +41,7 @@ interface AISettingsModalProps {
 export const AISettingsModal: React.FC<AISettingsModalProps> = ({
   isOpen,
   onClose,
-  initialTab = 'models',
+  initialTab = 'routing',
   onModelSwitched,
   workspacePath,
 }) => {
@@ -56,7 +56,6 @@ export const AISettingsModal: React.FC<AISettingsModalProps> = ({
   const [activeModel, setActiveModel] = useState<string>('');
   const [credentials, setCredentials] = useState<Record<string, { hasKey: boolean; maskedKey: string }>>({});
   const [contextUsage, setContextUsage] = useState<any>(null);
-  const [showAllModels, setShowAllModels] = useState(false);
 
   // Skills & Profiles
   const [skills, setSkills] = useState<any[]>([]);
@@ -91,7 +90,7 @@ export const AISettingsModal: React.FC<AISettingsModalProps> = ({
     try {
       const [configRes, modelsRes, credsRes, ctxRes, skillsRes, toolsRes, pluginsRes, connectorsRes] = await Promise.all([
         axios.get(`${API}/ai/runtime-config${workspacePath ? `?workspace=${encodeURIComponent(workspacePath)}` : ''}`).catch(() => null),
-        axios.get(`${API}/ai/models?all=true`).catch(() => null),
+        axios.get(`${API}/ai/models`).catch(() => null),
         axios.get(`${API}/ai/credentials`).catch(() => null),
         axios.get(`${API}/ai/context-usage${workspacePath ? `?workspace=${encodeURIComponent(workspacePath)}` : ''}`).catch(() => null),
         axios.get(`${API}/ai/skills`).catch(() => null),
@@ -311,9 +310,14 @@ export const AISettingsModal: React.FC<AISettingsModalProps> = ({
 
   // Determine connected models (connected either locally or via api key)
   const isModelConnected = (m: any) => {
-    if (m.status === 'ready' || m.status === 'connected') return true;
-    if (m.providerId === 'ollama') return m.status === 'ready';
-    if (m.providerId === 'custom') return Boolean(m.enabled && (m.status === 'ready' || m.status === 'connected'));
+    if (!m) return false;
+    if (m.providerId === 'ollama') {
+      return m.status === 'ready' || m.status === 'connected';
+    }
+    if (m.providerId === 'custom') {
+      return Boolean(m.enabled && (m.status === 'ready' || m.status === 'connected'));
+    }
+    // Cloud providers (google, openai, anthropic, etc.) MUST have an API key configured
     return Boolean(credentials[m.providerId]?.hasKey);
   };
 
@@ -322,8 +326,7 @@ export const AISettingsModal: React.FC<AISettingsModalProps> = ({
   // Filter items by search
   const query = searchQuery.toLowerCase().trim();
 
-  const targetModelsList = showAllModels ? models : connectedModels;
-  const filteredModels = targetModelsList.filter(m =>
+  const filteredModels = connectedModels.filter(m =>
     !query || m.name.toLowerCase().includes(query) || m.providerId.toLowerCase().includes(query)
   );
 
@@ -392,7 +395,7 @@ export const AISettingsModal: React.FC<AISettingsModalProps> = ({
             >
               <Cpu size={14} />
               <span>Models</span>
-              <span className="tab-counter">{models.length}</span>
+              <span className="tab-counter">{connectedModels.length}</span>
             </button>
             <button
               type="button"
@@ -496,14 +499,6 @@ export const AISettingsModal: React.FC<AISettingsModalProps> = ({
                     <p className="pane-subtitle">Switch active models with zero task loss or configure limits</p>
                   </div>
                   <div className="pane-actions">
-                    <button
-                      type="button"
-                      className="btn-secondary"
-                      onClick={() => setShowAllModels(!showAllModels)}
-                      title={showAllModels ? 'Show only models from connected providers' : 'Show all catalog models including unconfigured providers'}
-                    >
-                      {showAllModels ? `Show Connected Only (${connectedModels.length})` : `Show All Catalog (${models.length})`}
-                    </button>
                     <button type="button" className="btn-secondary" onClick={() => setActiveTab('providers')}>
                       <Layers size={13} /> Manage Providers
                     </button>
@@ -511,6 +506,16 @@ export const AISettingsModal: React.FC<AISettingsModalProps> = ({
                 </div>
 
                 <div className="models-grid">
+                  {filteredModels.length === 0 && (
+                    <div style={{ padding: '36px', textAlign: 'center', color: '#888', gridColumn: '1 / -1' }}>
+                      <Cpu size={32} style={{ margin: '0 auto 12px', opacity: 0.5 }} />
+                      <p style={{ fontWeight: 500, color: '#e0e0e0' }}>No models found for connected providers</p>
+                      <p style={{ fontSize: '12px', marginTop: '6px' }}>Configure an API key in the Providers tab or run Ollama locally.</p>
+                      <button type="button" className="btn-secondary" style={{ marginTop: '14px', display: 'inline-flex' }} onClick={() => setActiveTab('providers')}>
+                        <Layers size={13} /> Go to Providers
+                      </button>
+                    </div>
+                  )}
                   {filteredModels.map(m => {
                     const isActive = m.id === activeModel;
                     const isReady = m.status === 'ready' || m.status === 'connected';
@@ -861,7 +866,7 @@ export const AISettingsModal: React.FC<AISettingsModalProps> = ({
                       const cleanDef = phase.def.replace(/^ollama-/, '');
 
                       // Only models from existing/connected providers (locally or via API key)
-                      const availableForRouting = connectedModels.length > 0 ? connectedModels : models.filter(isModelConnected);
+                      const availableForRouting = connectedModels;
                       const hasDefaultInList = availableForRouting.some(
                         (m: any) => m.id.replace(/^ollama-/, '') === cleanDef
                       );
@@ -872,7 +877,7 @@ export const AISettingsModal: React.FC<AISettingsModalProps> = ({
                       );
                       const selectedVal = matchingModel
                         ? matchingModel.id.replace(/^ollama-/, '')
-                        : cleanCurrentVal;
+                        : (hasDefaultInList ? cleanDef : (availableForRouting[0]?.id.replace(/^ollama-/, '') || cleanCurrentVal));
 
                       return (
                         <div key={phase.key} className="workflow-routing-item">
@@ -895,8 +900,8 @@ export const AISettingsModal: React.FC<AISettingsModalProps> = ({
                                 .catch(() => {});
                             }}
                           >
-                            {!hasDefaultInList && (
-                              <option value={cleanDef}>{phase.def} (Default)</option>
+                            {availableForRouting.length === 0 && (
+                              <option value="" disabled>No connected models available</option>
                             )}
                             {availableForRouting.map((m: any) => {
                               const cleanId = m.id.replace(/^ollama-/, '');

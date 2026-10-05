@@ -330,6 +330,91 @@ app.post('/workspace/chat-history', (req, res) => {
   res.json({ status: 'ok', count: (chatMemoryCache.get(key) || []).length });
 });
 
+// --- TASK HISTORY ENDPOINTS ---
+
+export interface SavedTask {
+  id: string;
+  title: string;
+  timestamp: number;
+  messages: CachedMessage[];
+  workspace: string;
+}
+
+const tasksCache = new Map<string, SavedTask[]>();
+const tasksFile = path.join(
+  fsSync.existsSync('/host') ? '/host' : os.homedir(),
+  '.ai-native-editor',
+  'tasks.json'
+);
+
+async function loadPersistedTasks() {
+  try {
+    const raw = await fs.readFile(tasksFile, 'utf-8');
+    const data = JSON.parse(raw);
+    if (data && typeof data === 'object') {
+      for (const [key, list] of Object.entries(data)) {
+        if (Array.isArray(list)) {
+          tasksCache.set(key, list as SavedTask[]);
+        }
+      }
+    }
+  } catch { /* file may not exist yet */ }
+}
+loadPersistedTasks();
+
+async function savePersistedTasks() {
+  try {
+    const dir = path.dirname(tasksFile);
+    await fs.mkdir(dir, { recursive: true });
+    const obj: Record<string, SavedTask[]> = {};
+    for (const [k, v] of tasksCache.entries()) {
+      obj[k] = v;
+    }
+    await fs.writeFile(tasksFile, JSON.stringify(obj, null, 2), 'utf-8');
+  } catch (e) {
+    console.error('Failed to save tasks.json:', e);
+  }
+}
+
+app.get('/workspace/tasks', (req, res) => {
+  const workspaceParam = req.query.workspace as string | undefined;
+  const key = (!workspaceParam || workspaceParam === '__global__' || workspaceParam === 'global') ? '__global__' : workspaceParam;
+  const tasks = tasksCache.get(key) || [];
+  res.json({ workspace: key, tasks });
+});
+
+app.post('/workspace/tasks', async (req, res) => {
+  try {
+    const { workspace, task } = req.body;
+    const key = (!workspace || workspace === '__global__' || workspace === 'global') ? '__global__' : workspace;
+    if (task && task.id) {
+      const list = tasksCache.get(key) || [];
+      const filtered = list.filter(t => t.id !== task.id);
+      const updated = [task, ...filtered].slice(0, 50);
+      tasksCache.set(key, updated);
+      await savePersistedTasks();
+    }
+    res.json({ status: 'ok', count: (tasksCache.get(key) || []).length });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/workspace/tasks/:id', async (req, res) => {
+  try {
+    const taskId = req.params.id;
+    const workspaceParam = req.query.workspace as string | undefined;
+    const key = (!workspaceParam || workspaceParam === '__global__' || workspaceParam === 'global') ? '__global__' : workspaceParam;
+    const list = tasksCache.get(key) || [];
+    const updated = list.filter(t => t.id !== taskId);
+    tasksCache.set(key, updated);
+    await savePersistedTasks();
+    res.json({ status: 'ok', count: updated.length });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 async function dirExists(p?: string | null): Promise<boolean> {
   if (!p) return false;
   try {
