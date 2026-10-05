@@ -45,7 +45,7 @@ function sortFileNodes(nodes?: FileNode[]): FileNode[] {
   });
 }
 
-function getFileIcon(fileName: string) {
+export function getFileIcon(fileName: string) {
   const ext = fileName.split('.').pop()?.toLowerCase();
   if (['png', 'jpg', 'jpeg', 'svg', 'gif', 'webp', 'bmp'].includes(ext || '')) {
     return <FileImage size={14} className="text-amber-400" />;

@@ -150,10 +150,9 @@ async function runTests() {
   assert.strictEqual(diskRestored, originalCode, 'Reject change MUST restore original content on disk');
 
   const sessAfterReject = tracker.getSession();
-  const fileState = sessAfterReject.changedFiles.find((f) => f.path === changedFile.path);
-  assert.strictEqual(fileState?.status, 'rejected');
   assert.strictEqual(sessAfterReject.pendingChanges.length, 0);
-  console.log('✓ Reject change correctly reverted file on disk to original state');
+  assert.strictEqual(sessAfterReject.changedFiles.some((f) => f.path === changedFile.path), false);
+  console.log('✓ Reject change correctly reverted file on disk to original state and removed from changedFiles');
 
   // Re-apply and accept
   tracker.recordFileChange(targetFile, originalCode, modifiedCode);
@@ -161,8 +160,9 @@ async function runTests() {
   await tracker.acceptChange(changedFile.path);
   assert.strictEqual(fs.readFileSync(targetFile, 'utf-8'), modifiedCode);
   const sessAfterAccept = tracker.getSession();
-  assert.strictEqual(sessAfterAccept.changedFiles.find((f) => f.path === changedFile.path)?.status, 'accepted');
-  console.log('✓ Accept change preserved modified content on disk and marked accepted');
+  assert.strictEqual(sessAfterAccept.pendingChanges.length, 0);
+  assert.strictEqual(sessAfterAccept.changedFiles.some((f) => f.path === changedFile.path), false);
+  console.log('✓ Accept change preserved modified content on disk and removed from changedFiles');
 
   // Test 9: Cancel / Stop Preservation (Section 52, 53)
   console.log('Test 9: Cancel / Stop Preservation');

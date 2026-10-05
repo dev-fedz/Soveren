@@ -226,7 +226,7 @@ export const AgentActivityTimeline: React.FC<AgentActivityTimelineProps> = ({
                                     originalContent: activity.file.oldContent || '',
                                     modifiedContent: activity.file.newContent || '',
                                     diff: activity.file.diff,
-                                    status: 'pending',
+                                    status: (reviewStatus || 'accepted') as any,
                                   });
                                 }
                               }}

@@ -68,24 +68,26 @@ export const ChangedFilesPanel: React.FC<ChangedFilesPanelProps> = ({
         </div>
 
         {/* Bulk Action Buttons (Section 38: [Reject all] [Accept all ▼]) */}
-        <div className="changed-files-bulk-actions" onClick={(e) => e.stopPropagation()}>
-          <button
-            className="bulk-action-btn btn-reject-all"
-            onClick={() => onRejectAll(changedFiles)}
-            title="Reject all pending changes and revert files"
-          >
-            <RotateCcw size={12} />
-            <span>Reject all</span>
-          </button>
-          <button
-            className="bulk-action-btn btn-accept-all"
-            onClick={() => onAcceptAll(changedFiles)}
-            title="Accept all changes"
-          >
-            <CheckCheck size={12} />
-            <span>Accept all ▼</span>
-          </button>
-        </div>
+        {pendingCount > 0 && (
+          <div className="changed-files-bulk-actions" onClick={(e) => e.stopPropagation()}>
+            <button
+              className="bulk-action-btn btn-reject-all"
+              onClick={() => onRejectAll(changedFiles)}
+              title="Reject all pending changes and revert files"
+            >
+              <RotateCcw size={12} />
+              <span>Reject all</span>
+            </button>
+            <button
+              className="bulk-action-btn btn-accept-all"
+              onClick={() => onAcceptAll(changedFiles)}
+              title="Accept all changes"
+            >
+              <CheckCheck size={12} />
+              <span>Accept all ▼</span>
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Expanded File List */}
@@ -128,30 +130,28 @@ export const ChangedFilesPanel: React.FC<ChangedFilesPanelProps> = ({
                   </span>
                 </div>
 
-                {/* Individual Accept / Reject Buttons */}
-                <div
-                  className="file-row-actions"
-                  onClick={(e) => e.stopPropagation()}
-                >
-                  <button
-                    className={`file-action-btn btn-accept ${
-                      file.status === 'accepted' ? 'active' : ''
-                    }`}
-                    onClick={() => onAcceptChange(file.path, file)}
-                    title={`Accept change for ${basename}`}
+                {/* Individual Accept / Reject Buttons - only if pending */}
+                {file.status === 'pending' && (
+                  <div
+                    className="file-row-actions"
+                    onClick={(e) => e.stopPropagation()}
                   >
-                    <Check size={12} />
-                  </button>
-                  <button
-                    className={`file-action-btn btn-reject ${
-                      file.status === 'rejected' ? 'active' : ''
-                    }`}
-                    onClick={() => onRejectChange(file.path, file)}
-                    title={`Reject change and revert ${basename}`}
-                  >
-                    <X size={12} />
-                  </button>
-                </div>
+                    <button
+                      className="file-action-btn btn-accept"
+                      onClick={() => onAcceptChange(file.path, file)}
+                      title={`Accept change for ${basename}`}
+                    >
+                      <Check size={12} />
+                    </button>
+                    <button
+                      className="file-action-btn btn-reject"
+                      onClick={() => onRejectChange(file.path, file)}
+                      title={`Reject change and revert ${basename}`}
+                    >
+                      <X size={12} />
+                    </button>
+                  </div>
+                )}
               </div>
             );
           })}

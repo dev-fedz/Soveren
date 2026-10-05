@@ -1,10 +1,10 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import Editor, { DiffEditor } from '@monaco-editor/react';
 import { io, Socket } from 'socket.io-client';
-import { Send, Code, Globe, Bot, Folder, FolderOpen, Sparkles, Trash2, Sliders, Settings as SettingsIcon, Square, Check, RotateCcw, X, Loader2, Plus, Activity, Image as ImageIcon, FileText, History, Clock } from 'lucide-react';
+import { Send, Code, Globe, Bot, Folder, FolderOpen, Sparkles, Trash2, Sliders, Settings as SettingsIcon, Square, Check, RotateCcw, X, Loader2, Plus, Activity, Image as ImageIcon, FileText, History, Clock, GitCompare, FileCode, MoreVertical } from 'lucide-react';
 import axios from 'axios';
 import { MessageRenderer, type ChatMessage } from './components/MessageRenderer';
-import { Explorer, type ExplorerStatus, type FileNode } from './components/Explorer';
+import { Explorer, getFileIcon, type ExplorerStatus, type FileNode } from './components/Explorer';
 import { WorkspaceIndicator } from './components/WorkspaceIndicator';
 import { DirectoryPicker } from './components/DirectoryPicker';
 import { FormatterModal, type FormatterInfo } from './components/FormatterModal';
@@ -129,12 +129,104 @@ function getLanguageFromPath(filePath: string): string {
   }
 }
 
+export interface OpenFileTab {
+  path: string;
+  name: string;
+  content: string;
+  savedContent: string;
+  isModified: boolean;
+  language: string;
+}
+
 let socket: Socket;
 function getSocket(): Socket {
   if (!socket) {
     socket = io(SOCKET_URL);
   }
   return socket;
+}
+
+function sanitizeTaskMessages(messages: any[]): any[] {
+  if (!Array.isArray(messages)) return [];
+  return messages.map((msg) => {
+    if (!msg || typeof msg !== 'object') return msg;
+    const reviewTags = { ...(msg.fileReviewTags || {}) };
+    let changedFiles = Array.isArray(msg.changedFiles) ? [...msg.changedFiles] : undefined;
+
+    if (changedFiles && changedFiles.length > 0) {
+      const reviewed = changedFiles.filter((f: any) => f && (f.status === 'accepted' || f.status === 'rejected'));
+      for (const rf of reviewed) {
+        if (rf.path) {
+          reviewTags[rf.path] = rf.status;
+        }
+      }
+    }
+
+    if (changedFiles && Object.keys(reviewTags).length > 0) {
+      changedFiles = changedFiles.filter((f: any) => {
+        if (!f || !f.path) return false;
+        const isReviewed = Object.keys(reviewTags).some(
+          (p) => p === f.path || p.endsWith(f.path) || f.path.endsWith(p)
+        );
+        return !isReviewed;
+      });
+      if (changedFiles.length === 0) changedFiles = undefined;
+    }
+
+    return {
+      ...msg,
+      changedFiles,
+      fileReviewTags: Object.keys(reviewTags).length > 0 ? reviewTags : undefined,
+    };
+  });
+}
+
+function updateMessageListWithFileReview(
+  msgList: any[],
+  filePath: string,
+  status: 'accepted' | 'rejected'
+): any[] {
+  return msgList.map((msg) => {
+    const hasFile = msg.changedFiles?.some(
+      (f: any) => f.path === filePath || f.path.endsWith(filePath) || filePath.endsWith(f.path)
+    );
+    if (!hasFile) return msg;
+    const remaining = (msg.changedFiles || []).filter(
+      (f: any) => f.path !== filePath && !f.path.endsWith(filePath) && !filePath.endsWith(f.path)
+    );
+    const updatedTags = { ...(msg.fileReviewTags || {}), [filePath]: status };
+    return {
+      ...msg,
+      changedFiles: remaining.length > 0 ? remaining : undefined,
+      fileReviewTags: updatedTags,
+    };
+  });
+}
+
+function updateMessageListWithBulkReview(
+  msgList: any[],
+  paths: string[],
+  status: 'accepted' | 'rejected'
+): any[] {
+  return msgList.map((msg) => {
+    const hasAny = msg.changedFiles?.some(
+      (f: any) => paths.length === 0 || paths.some((p: string) => f.path === p || f.path.endsWith(p) || p.endsWith(f.path))
+    );
+    if (!hasAny) return msg;
+    const remaining = (msg.changedFiles || []).filter(
+      (f: any) => paths.length > 0 && !paths.some((p: string) => f.path === p || f.path.endsWith(p) || p.endsWith(f.path))
+    );
+    const updatedTags = { ...(msg.fileReviewTags || {}) };
+    const affectedFiles = paths.length > 0 ? paths : (msg.changedFiles || []).map((f: any) => f.path);
+    for (const p of affectedFiles) {
+      updatedTags[p] = status;
+    }
+    return {
+      ...msg,
+      changedFiles: remaining.length > 0 ? remaining : undefined,
+      fileReviewTags: updatedTags,
+    };
+  });
 }
 
 function sanitizeTaskHistoryList(list: any[]): any[] {
@@ -153,7 +245,10 @@ function sanitizeTaskHistoryList(list: any[]): any[] {
     if (!seenIds.has(task.id) && !seenKeys.has(dedupKey)) {
       seenIds.add(task.id);
       seenKeys.add(dedupKey);
-      deduped.push(task);
+      deduped.push({
+        ...task,
+        messages: sanitizeTaskMessages(msgs),
+      });
     }
   }
   return deduped;
@@ -235,8 +330,31 @@ export default function AIIDE() {
   const [projectStructure, setProjectStructure] = useState<FileNode | null>(null);
   const [explorerError, setExplorerError] = useState<string | null>(null);
 
-  // Formatter state
+  // Formatter & active file state
   const [activeFilePath, setActiveFilePath] = useState('');
+  const activeFilePathRef = useRef<string>('');
+  activeFilePathRef.current = activeFilePath;
+
+  // Open File Tabs State
+  const [openFiles, setOpenFiles] = useState<OpenFileTab[]>([]);
+  const openFilesRef = useRef<OpenFileTab[]>([]);
+  openFilesRef.current = openFiles;
+
+  const [openFilesByWorkspace, setOpenFilesByWorkspace] = useState<Record<string, { tabs: OpenFileTab[]; activePath: string }>>(() => {
+    try {
+      const saved = localStorage.getItem('ai_ide_open_files');
+      return saved ? JSON.parse(saved) : {};
+    } catch {
+      return {};
+    }
+  });
+
+  const persistOpenFiles = useCallback((cache: Record<string, { tabs: OpenFileTab[]; activePath: string }>) => {
+    try {
+      localStorage.setItem('ai_ide_open_files', JSON.stringify(cache));
+    } catch {}
+  }, []);
+
   const [allFormatters, setAllFormatters] = useState<FormatterInfo[]>([]);
   const [formatOnSave, setFormatOnSave] = useState(false);
   const [formatterModalOpen, setFormatterModalOpen] = useState(false);
@@ -374,8 +492,10 @@ export default function AIIDE() {
     }
   });
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
+  const [isChatMenuOpen, setIsChatMenuOpen] = useState(false);
   const historyDropdownRef = useRef<HTMLDivElement>(null);
   const historyButtonRef = useRef<HTMLButtonElement>(null);
+  const chatMenuRef = useRef<HTMLDivElement>(null);
 
   const persistTasks = useCallback((updatedTasks: Record<string, any[]>) => {
     try {
@@ -488,18 +608,137 @@ export default function AIIDE() {
     }
   }, [workspaceActive]);
 
-  // --- Load file content ---
-  const loadFileContent = useCallback(async (filePath: string, name: string) => {
-    try {
-      setFileName(name);
-      setActiveFilePath(filePath);
-      const res = await axios.get(`${API}/file-content?path=${encodeURIComponent(filePath)}`);
-      setCode(res.data.content);
-    } catch (e) {
-      console.error('Failed to load file content');
-      setCode('// Error loading file content.');
+  // --- File Tab Management ---
+  const selectTab = useCallback((filePath: string) => {
+    const tab = openFilesRef.current.find((t) => t.path === filePath);
+    if (!tab) return;
+    setActiveFilePath(tab.path);
+    setFileName(tab.name);
+    setCode(tab.content);
+    setDiffViewFile(null);
+    setActiveTab('code');
+  }, []);
+
+  const closeTab = useCallback((filePathToClose: string, e?: React.MouseEvent) => {
+    if (e) {
+      e.stopPropagation();
+    }
+    const currentTabs = openFilesRef.current;
+    const closeIdx = currentTabs.findIndex((t) => t.path === filePathToClose);
+    if (closeIdx === -1) return;
+
+    const nextTabs = currentTabs.filter((t) => t.path !== filePathToClose);
+    setOpenFiles(nextTabs);
+
+    if (activeFilePathRef.current === filePathToClose) {
+      if (nextTabs.length > 0) {
+        const nextActiveIdx = Math.min(closeIdx, nextTabs.length - 1);
+        const nextTab = nextTabs[nextActiveIdx];
+        setActiveFilePath(nextTab.path);
+        setFileName(nextTab.name);
+        setCode(nextTab.content);
+      } else {
+        setActiveFilePath('');
+        setFileName('');
+        setCode('');
+      }
     }
   }, []);
+
+  const openFile = useCallback(
+    async (
+      filePath: string,
+      customName?: string,
+      initialContent?: string,
+      shouldActivate: boolean = true
+    ) => {
+      if (!filePath) return;
+      const name = customName || filePath.split('/').pop() || 'file';
+      const existingTab = openFilesRef.current.find((t) => t.path === filePath);
+
+      if (existingTab) {
+        if (initialContent !== undefined && initialContent !== existingTab.content) {
+          setOpenFiles((prev) =>
+            prev.map((t) =>
+              t.path === filePath
+                ? { ...t, content: initialContent, savedContent: initialContent, isModified: false }
+                : t
+            )
+          );
+        }
+        if (shouldActivate) {
+          setActiveFilePath(existingTab.path);
+          setFileName(existingTab.name);
+          setCode(initialContent !== undefined ? initialContent : existingTab.content);
+          setActiveTab('code');
+          setDiffViewFile(null);
+        }
+        return;
+      }
+
+      let content = initialContent;
+      if (content === undefined) {
+        try {
+          const res = await axios.get(`${API}/file-content?path=${encodeURIComponent(filePath)}`);
+          content = res.data?.content ?? '';
+        } catch (e) {
+          console.error('[openFile] Failed to fetch content for', filePath, e);
+          content = '// Unable to load file content';
+        }
+      }
+
+      const newTab: OpenFileTab = {
+        path: filePath,
+        name,
+        content,
+        savedContent: content,
+        isModified: false,
+        language: getLanguageFromPath(filePath),
+      };
+
+      setOpenFiles((prev) => {
+        if (prev.some((t) => t.path === filePath)) return prev;
+        return [...prev, newTab];
+      });
+
+      if (shouldActivate) {
+        setActiveFilePath(filePath);
+        setFileName(name);
+        setCode(content);
+        setActiveTab('code');
+        setDiffViewFile(null);
+      }
+    },
+    []
+  );
+
+  const handleEditorChange = useCallback((newVal: string | undefined) => {
+    const updatedVal = newVal ?? '';
+    setCode(updatedVal);
+    const curPath = activeFilePathRef.current;
+    if (!curPath) return;
+
+    setOpenFiles((prev) =>
+      prev.map((tab) => {
+        if (tab.path === curPath) {
+          return {
+            ...tab,
+            content: updatedVal,
+            isModified: updatedVal !== tab.savedContent,
+          };
+        }
+        return tab;
+      })
+    );
+  }, []);
+
+  // --- Load file content (opens/activates tab) ---
+  const loadFileContent = useCallback(
+    async (filePath: string, name: string) => {
+      await openFile(filePath, name, undefined, true);
+    },
+    [openFile]
+  );
 
   // --- Initialize ---
   useEffect(() => {
@@ -535,10 +774,7 @@ export default function AIIDE() {
         setActiveTab(wsState.activeSurface);
       }
       if (wsState.activeFilePath) {
-        setActiveFilePath(wsState.activeFilePath);
-        const name = wsState.activeFilePath.split('/').pop() || 'File';
-        setFileName(name);
-        loadFileContent(wsState.activeFilePath, name);
+        openFile(wsState.activeFilePath, undefined, undefined, true);
       }
       if (wsState.activeBrowserTab) {
         selectBrowserTab(wsState.activeBrowserTab);
@@ -568,11 +804,7 @@ export default function AIIDE() {
       if (action.type === 'open_file' || action.type === 'create_file') {
         triggerAgentCursor('code', `Opening ${action.target || 'Code'}`);
         if (action.target) {
-          setActiveTab('code');
-          setActiveFilePath(action.target);
-          const name = action.target.split('/').pop() || 'File';
-          setFileName(name);
-          loadFileContent(action.target, name);
+          openFile(action.target, undefined, undefined, true);
         }
       } else if (action.type === 'open_browser') {
         triggerAgentCursor('browser', 'Opening Browser');
@@ -768,6 +1000,13 @@ export default function AIIDE() {
           activities: updatedActivities,
         };
       });
+
+      // Synchronize file operations: if agent is accessing or modifying a file, open/activate tab
+      const targetPath = (activity.metadata?.filePath as string) || (activity.metadata?.target as string) || (activity.details?.target as string) || (activity.path as string);
+      if (targetPath && typeof targetPath === 'string' && (targetPath.includes('.') || targetPath.includes('/'))) {
+        const shouldActivate = activity.type === 'editing' || activity.type === 'creating';
+        openFile(targetPath, undefined, undefined, shouldActivate);
+      }
     });
 
     sock.on('agent_file_changes', (changedFiles: ChangedFile[]) => {
@@ -781,6 +1020,47 @@ export default function AIIDE() {
         };
       });
       loadProjectStructure();
+
+      // Synchronize open tabs with agent file changes
+      for (const cf of changedFiles) {
+        const filePath = cf.path;
+        const name = cf.path.split('/').pop() || cf.path;
+        const content = cf.modifiedContent || '';
+
+        const existing = openFilesRef.current.find(
+          (t) => t.path === filePath || t.path.endsWith(filePath) || filePath.endsWith(t.path)
+        );
+        if (existing) {
+          setOpenFiles((prev) =>
+            prev.map((t) =>
+              t.path === existing.path
+                ? { ...t, content, isModified: true }
+                : t
+            )
+          );
+          if (activeFilePathRef.current === existing.path) {
+            setCode(content);
+          }
+        } else {
+          const newTab: OpenFileTab = {
+            path: filePath,
+            name,
+            content,
+            savedContent: cf.originalContent || '',
+            isModified: true,
+            language: getLanguageFromPath(filePath),
+          };
+          setOpenFiles((prev) => {
+            if (prev.some((t) => t.path === filePath || t.path.endsWith(filePath) || filePath.endsWith(t.path))) return prev;
+            return [...prev, newTab];
+          });
+          if (!activeFilePathRef.current) {
+            setActiveFilePath(filePath);
+            setFileName(name);
+            setCode(content);
+          }
+        }
+      }
     });
 
     // Query active agent session immediately for current workspace
@@ -850,9 +1130,35 @@ export default function AIIDE() {
         persistChats(updated);
         return updated;
       });
+
+      if (oldKey) {
+        setOpenFilesByWorkspace((prev) => {
+          const updated = {
+            ...prev,
+            [oldKey]: { tabs: openFilesRef.current, activePath: activeFilePathRef.current },
+          };
+          persistOpenFiles(updated);
+          return updated;
+        });
+      }
     }
 
     prevWorkspaceKeyRef.current = newKey;
+
+    // Load open files for active workspace
+    const cachedTabsObj = openFilesByWorkspace[newKey];
+    if (cachedTabsObj && cachedTabsObj.tabs.length > 0) {
+      setOpenFiles(cachedTabsObj.tabs);
+      const active = cachedTabsObj.tabs.find((t) => t.path === cachedTabsObj.activePath) || cachedTabsObj.tabs[0];
+      setActiveFilePath(active.path);
+      setFileName(active.name);
+      setCode(active.content);
+    } else {
+      setOpenFiles([]);
+      setActiveFilePath('');
+      setFileName('');
+      setCode('// Select a file to view code');
+    }
 
     // Load conversation for the active workspace:
     // 1. Check in-memory/local cache first for instant pull
@@ -912,23 +1218,22 @@ export default function AIIDE() {
     loadProjectStructure();
   }, [workspace.path, getWorkspaceKey, loadProjectStructure, persistChats, persistTasks, sanitizeTaskList]);
 
-  // Close Task History dropdown on outside click
+  // Close 3-dot Chat Menu and Task History dropdown on outside click
   useEffect(() => {
-    if (!isHistoryOpen) return;
+    if (!isHistoryOpen && !isChatMenuOpen) return;
     const handleClickOutside = (e: MouseEvent) => {
       const target = e.target as Node;
       if (
-        historyDropdownRef.current &&
-        !historyDropdownRef.current.contains(target) &&
-        historyButtonRef.current &&
-        !historyButtonRef.current.contains(target)
+        chatMenuRef.current &&
+        !chatMenuRef.current.contains(target)
       ) {
+        setIsChatMenuOpen(false);
         setIsHistoryOpen(false);
       }
     };
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, [isHistoryOpen]);
+  }, [isHistoryOpen, isChatMenuOpen]);
 
   // Auto-scroll chat
   useEffect(() => {
@@ -987,6 +1292,13 @@ export default function AIIDE() {
 
         if (typeof result.formatted === 'string') {
           setCode(result.formatted);
+          setOpenFiles((prev) =>
+            prev.map((t) =>
+              t.path === activeFilePath
+                ? { ...t, content: result.formatted, isModified: result.formatted !== t.savedContent }
+                : t
+            )
+          );
           setFormatterToast({
             type: 'success',
             text: `Formatted with ${result.formatterName} ✓`,
@@ -1005,6 +1317,45 @@ export default function AIIDE() {
     },
     [code, activeFilePath, fileName, activeLanguage, workspace.path],
   );
+
+  const handleSaveFile = useCallback(async () => {
+    const currentTabs = openFilesRef.current;
+    const currentPath = activeFilePathRef.current;
+    if (!currentPath) return;
+    const tab = currentTabs.find((t) => t.path === currentPath);
+    if (!tab) return;
+
+    try {
+      await axios.post(`${API}/file-content`, {
+        path: tab.path,
+        content: tab.content,
+      });
+      setOpenFiles((prev) =>
+        prev.map((t) =>
+          t.path === currentPath
+            ? { ...t, savedContent: t.content, isModified: false }
+            : t
+        )
+      );
+      setFormatterToast({
+        type: 'success',
+        text: `Saved ${tab.name} ✓`,
+      });
+      setTimeout(() => {
+        setFormatterToast((prev) => (prev?.type === 'success' ? null : prev));
+      }, 2000);
+
+      if (formatOnSave) {
+        handleFormatDocument();
+      }
+    } catch (e: any) {
+      console.error('Failed to save file:', e);
+      setFormatterToast({
+        type: 'error',
+        text: `Failed to save file: ${e.response?.data?.error || e.message}`,
+      });
+    }
+  }, [formatOnSave, handleFormatDocument]);
 
   const handleToggleFormatOnSave = useCallback(async (enabled: boolean) => {
     setFormatOnSave(enabled);
@@ -1077,18 +1428,26 @@ export default function AIIDE() {
         return;
       }
 
-      // Format on Save (Cmd + S or Ctrl + S)
+      // Save (Cmd + S or Ctrl + S)
       if ((e.metaKey || e.ctrlKey) && (e.key === 's' || e.key === 'S')) {
-        if (formatOnSave) {
+        e.preventDefault();
+        handleSaveFile();
+        return;
+      }
+
+      // Close Tab (Cmd + W or Ctrl + W)
+      if ((e.metaKey || e.ctrlKey) && (e.key === 'w' || e.key === 'W')) {
+        if (activeFilePathRef.current) {
           e.preventDefault();
-          handleFormatDocument();
+          closeTab(activeFilePathRef.current);
+          return;
         }
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [handleFormatDocument, formatOnSave]);
+  }, [handleFormatDocument, handleSaveFile, closeTab]);
 
   // --- Handlers ---
   const handleSend = useCallback(async () => {
@@ -1261,42 +1620,58 @@ export default function AIIDE() {
       })
       .catch(() => {});
 
-    // Update React state: remove file from changedFiles and add 'accepted' tag
-    setMessages((prev) =>
-      prev.map((msg) => {
-        const hasFile = msg.changedFiles?.some((f) => f.path === filePath || f.path.endsWith(filePath) || filePath.endsWith(f.path));
-        if (!hasFile) return msg;
-        const remaining = (msg.changedFiles || []).filter(
-          (f) => f.path !== filePath && !f.path.endsWith(filePath) && !filePath.endsWith(f.path)
-        );
-        const updatedTags = { ...(msg.fileReviewTags || {}), [filePath]: 'accepted' as const };
-        return {
-          ...msg,
-          changedFiles: remaining.length > 0 ? remaining : undefined,
-          fileReviewTags: updatedTags,
-        };
-      })
-    );
+    const wsKey = getWorkspaceKey(workspace.path);
+    const wsTarget = workspace.path || '__global__';
 
+    // 1. Update active messages state & sync chat-history
+    setMessages((prev) => {
+      const updated = updateMessageListWithFileReview(prev, filePath, 'accepted');
+      axios.post(`${API}/workspace/chat-history`, {
+        workspace: wsTarget,
+        messages: updated,
+      }).catch(() => {});
+      return updated;
+    });
+
+    // 2. Update workspace chats cache & localStorage
     setChatsByWorkspace((prev) => {
-      const key = getWorkspaceKey(workspace.path);
-      const existing = prev[key] || [];
-      const updated = existing.map((msg) => {
-        const hasFile = msg.changedFiles?.some((f) => f.path === filePath || f.path.endsWith(filePath) || filePath.endsWith(f.path));
-        if (!hasFile) return msg;
-        const remaining = (msg.changedFiles || []).filter(
-          (f) => f.path !== filePath && !f.path.endsWith(filePath) && !filePath.endsWith(f.path)
-        );
-        const updatedTags = { ...(msg.fileReviewTags || {}), [filePath]: 'accepted' as const };
-        return {
-          ...msg,
-          changedFiles: remaining.length > 0 ? remaining : undefined,
-          fileReviewTags: updatedTags,
-        };
-      });
-      const next = { ...prev, [key]: updated };
+      const existing = prev[wsKey] || [];
+      const updated = updateMessageListWithFileReview(existing, filePath, 'accepted');
+      const next = { ...prev, [wsKey]: updated };
       persistChats(next);
       return next;
+    });
+
+    // 3. Update tasks in history & backend
+    setTasksByWorkspace((prev) => {
+      const existing = prev[wsKey] || [];
+      const currentTaskId = activeTaskIdRef.current;
+      let anyTaskUpdated = false;
+      const nextList = existing.map((t) => {
+        const isCurrent = currentTaskId && t.id === currentTaskId;
+        const containsFile = t.messages?.some((m: any) =>
+          m.changedFiles?.some((f: any) => f.path === filePath || f.path.endsWith(filePath) || filePath.endsWith(f.path))
+        );
+        if (isCurrent || containsFile) {
+          anyTaskUpdated = true;
+          const updatedTask = {
+            ...t,
+            messages: updateMessageListWithFileReview(t.messages || [], filePath, 'accepted'),
+          };
+          axios.post(`${API}/workspace/tasks`, {
+            workspace: wsTarget,
+            task: updatedTask,
+          }).catch(() => {});
+          return updatedTask;
+        }
+        return t;
+      });
+      if (anyTaskUpdated) {
+        const next = { ...prev, [wsKey]: nextList };
+        persistTasks(next);
+        return next;
+      }
+      return prev;
     });
 
     setAgentSession((prev) => {
@@ -1308,11 +1683,31 @@ export default function AIIDE() {
       };
     });
 
+    // Update open tabs if this file is open
+    setOpenFiles((prev) =>
+      prev.map((t) => {
+        if (t.path === filePath || t.path.endsWith(filePath) || filePath.endsWith(t.path)) {
+          return {
+            ...t,
+            content: targetFile?.modifiedContent ?? t.content,
+            savedContent: targetFile?.modifiedContent ?? t.content,
+            isModified: false,
+          };
+        }
+        return t;
+      })
+    );
+    if (activeFilePathRef.current === filePath || activeFilePathRef.current.endsWith(filePath) || filePath.endsWith(activeFilePathRef.current)) {
+      if (targetFile?.modifiedContent !== undefined) {
+        setCode(targetFile.modifiedContent);
+      }
+    }
+
     if (diffViewFile?.path === filePath || diffViewFile?.path.endsWith(filePath) || filePath.endsWith(diffViewFile?.path || '')) {
       setDiffViewFile(null);
     }
     loadProjectStructure();
-  }, [agentSession, diffViewFile, workspace.path, getWorkspaceKey, persistChats, loadProjectStructure]);
+  }, [agentSession, diffViewFile, workspace.path, getWorkspaceKey, persistChats, persistTasks, loadProjectStructure]);
 
   const handleRejectChange = useCallback((filePath: string, fileObj?: ChangedFile) => {
     const targetFile = fileObj || agentSession?.changedFiles?.find(f => f.path === filePath || f.path.endsWith(filePath) || filePath.endsWith(f.path));
@@ -1330,42 +1725,58 @@ export default function AIIDE() {
       })
       .catch(() => {});
 
-    // Update React state: remove file from changedFiles and add 'rejected' tag
-    setMessages((prev) =>
-      prev.map((msg) => {
-        const hasFile = msg.changedFiles?.some((f) => f.path === filePath || f.path.endsWith(filePath) || filePath.endsWith(f.path));
-        if (!hasFile) return msg;
-        const remaining = (msg.changedFiles || []).filter(
-          (f) => f.path !== filePath && !f.path.endsWith(filePath) && !filePath.endsWith(f.path)
-        );
-        const updatedTags = { ...(msg.fileReviewTags || {}), [filePath]: 'rejected' as const };
-        return {
-          ...msg,
-          changedFiles: remaining.length > 0 ? remaining : undefined,
-          fileReviewTags: updatedTags,
-        };
-      })
-    );
+    const wsKey = getWorkspaceKey(workspace.path);
+    const wsTarget = workspace.path || '__global__';
 
+    // 1. Update active messages state & sync chat-history
+    setMessages((prev) => {
+      const updated = updateMessageListWithFileReview(prev, filePath, 'rejected');
+      axios.post(`${API}/workspace/chat-history`, {
+        workspace: wsTarget,
+        messages: updated,
+      }).catch(() => {});
+      return updated;
+    });
+
+    // 2. Update workspace chats cache & localStorage
     setChatsByWorkspace((prev) => {
-      const key = getWorkspaceKey(workspace.path);
-      const existing = prev[key] || [];
-      const updated = existing.map((msg) => {
-        const hasFile = msg.changedFiles?.some((f) => f.path === filePath || f.path.endsWith(filePath) || filePath.endsWith(f.path));
-        if (!hasFile) return msg;
-        const remaining = (msg.changedFiles || []).filter(
-          (f) => f.path !== filePath && !f.path.endsWith(filePath) && !filePath.endsWith(f.path)
-        );
-        const updatedTags = { ...(msg.fileReviewTags || {}), [filePath]: 'rejected' as const };
-        return {
-          ...msg,
-          changedFiles: remaining.length > 0 ? remaining : undefined,
-          fileReviewTags: updatedTags,
-        };
-      });
-      const next = { ...prev, [key]: updated };
+      const existing = prev[wsKey] || [];
+      const updated = updateMessageListWithFileReview(existing, filePath, 'rejected');
+      const next = { ...prev, [wsKey]: updated };
       persistChats(next);
       return next;
+    });
+
+    // 3. Update tasks in history & backend
+    setTasksByWorkspace((prev) => {
+      const existing = prev[wsKey] || [];
+      const currentTaskId = activeTaskIdRef.current;
+      let anyTaskUpdated = false;
+      const nextList = existing.map((t) => {
+        const isCurrent = currentTaskId && t.id === currentTaskId;
+        const containsFile = t.messages?.some((m: any) =>
+          m.changedFiles?.some((f: any) => f.path === filePath || f.path.endsWith(filePath) || filePath.endsWith(f.path))
+        );
+        if (isCurrent || containsFile) {
+          anyTaskUpdated = true;
+          const updatedTask = {
+            ...t,
+            messages: updateMessageListWithFileReview(t.messages || [], filePath, 'rejected'),
+          };
+          axios.post(`${API}/workspace/tasks`, {
+            workspace: wsTarget,
+            task: updatedTask,
+          }).catch(() => {});
+          return updatedTask;
+        }
+        return t;
+      });
+      if (anyTaskUpdated) {
+        const next = { ...prev, [wsKey]: nextList };
+        persistTasks(next);
+        return next;
+      }
+      return prev;
     });
 
     setAgentSession((prev) => {
@@ -1377,11 +1788,31 @@ export default function AIIDE() {
       };
     });
 
+    // Update open tabs if this file is open
+    setOpenFiles((prev) =>
+      prev.map((t) => {
+        if (t.path === filePath || t.path.endsWith(filePath) || filePath.endsWith(t.path)) {
+          return {
+            ...t,
+            content: targetFile?.originalContent ?? t.content,
+            savedContent: targetFile?.originalContent ?? t.content,
+            isModified: false,
+          };
+        }
+        return t;
+      })
+    );
+    if (activeFilePathRef.current === filePath || activeFilePathRef.current.endsWith(filePath) || filePath.endsWith(activeFilePathRef.current)) {
+      if (targetFile?.originalContent !== undefined) {
+        setCode(targetFile.originalContent);
+      }
+    }
+
     if (diffViewFile?.path === filePath || diffViewFile?.path.endsWith(filePath) || filePath.endsWith(diffViewFile?.path || '')) {
       setDiffViewFile(null);
     }
     loadProjectStructure();
-  }, [agentSession, diffViewFile, workspace.path, getWorkspaceKey, persistChats, loadProjectStructure]);
+  }, [agentSession, diffViewFile, workspace.path, getWorkspaceKey, persistChats, persistTasks, loadProjectStructure]);
 
   const handleAcceptAll = useCallback((filesList?: ChangedFile[]) => {
     const filesToAccept = filesList && filesList.length > 0
@@ -1401,58 +1832,88 @@ export default function AIIDE() {
       .catch(() => {});
 
     const paths = filesToAccept.map(f => f.path);
-    setMessages((prev) =>
-      prev.map((msg) => {
-        const hasAny = msg.changedFiles?.some((f) => paths.length === 0 || paths.some((p) => f.path === p || f.path.endsWith(p) || p.endsWith(f.path)));
-        if (!hasAny) return msg;
-        const remaining = (msg.changedFiles || []).filter(
-          (f) => paths.length > 0 && !paths.some((p) => f.path === p || f.path.endsWith(p) || p.endsWith(f.path))
-        );
-        const updatedTags = { ...(msg.fileReviewTags || {}) };
-        const affectedFiles = paths.length > 0 ? paths : (msg.changedFiles || []).map(f => f.path);
-        for (const p of affectedFiles) {
-          updatedTags[p] = 'accepted';
-        }
-        return {
-          ...msg,
-          changedFiles: remaining.length > 0 ? remaining : undefined,
-          fileReviewTags: updatedTags,
-        };
-      })
-    );
+    const wsKey = getWorkspaceKey(workspace.path);
+    const wsTarget = workspace.path || '__global__';
 
+    // 1. Update active messages state & sync chat-history
+    setMessages((prev) => {
+      const updated = updateMessageListWithBulkReview(prev, paths, 'accepted');
+      axios.post(`${API}/workspace/chat-history`, {
+        workspace: wsTarget,
+        messages: updated,
+      }).catch(() => {});
+      return updated;
+    });
+
+    // 2. Update workspace chats cache & localStorage
     setChatsByWorkspace((prev) => {
-      const key = getWorkspaceKey(workspace.path);
-      const existing = prev[key] || [];
-      const updated = existing.map((msg) => {
-        const hasAny = msg.changedFiles?.some((f) => paths.length === 0 || paths.some((p) => f.path === p || f.path.endsWith(p) || p.endsWith(f.path)));
-        if (!hasAny) return msg;
-        const remaining = (msg.changedFiles || []).filter(
-          (f) => paths.length > 0 && !paths.some((p) => f.path === p || f.path.endsWith(p) || p.endsWith(f.path))
-        );
-        const updatedTags = { ...(msg.fileReviewTags || {}) };
-        const affectedFiles = paths.length > 0 ? paths : (msg.changedFiles || []).map(f => f.path);
-        for (const p of affectedFiles) {
-          updatedTags[p] = 'accepted';
-        }
-        return {
-          ...msg,
-          changedFiles: remaining.length > 0 ? remaining : undefined,
-          fileReviewTags: updatedTags,
-        };
-      });
-      const next = { ...prev, [key]: updated };
+      const existing = prev[wsKey] || [];
+      const updated = updateMessageListWithBulkReview(existing, paths, 'accepted');
+      const next = { ...prev, [wsKey]: updated };
       persistChats(next);
       return next;
+    });
+
+    // 3. Update tasks in history & backend
+    setTasksByWorkspace((prev) => {
+      const existing = prev[wsKey] || [];
+      const currentTaskId = activeTaskIdRef.current;
+      let anyTaskUpdated = false;
+      const nextList = existing.map((t) => {
+        const isCurrent = currentTaskId && t.id === currentTaskId;
+        const containsFile = t.messages?.some((m: any) =>
+          m.changedFiles?.some((f: any) => paths.length === 0 || paths.some((p: string) => f.path === p || f.path.endsWith(p) || p.endsWith(f.path)))
+        );
+        if (isCurrent || containsFile) {
+          anyTaskUpdated = true;
+          const updatedTask = {
+            ...t,
+            messages: updateMessageListWithBulkReview(t.messages || [], paths, 'accepted'),
+          };
+          axios.post(`${API}/workspace/tasks`, {
+            workspace: wsTarget,
+            task: updatedTask,
+          }).catch(() => {});
+          return updatedTask;
+        }
+        return t;
+      });
+      if (anyTaskUpdated) {
+        const next = { ...prev, [wsKey]: nextList };
+        persistTasks(next);
+        return next;
+      }
+      return prev;
     });
 
     setAgentSession((prev) => {
       if (!prev) return prev;
       return { ...prev, changedFiles: [], pendingChanges: [] };
     });
+
+    // Update open tabs
+    setOpenFiles((prev) =>
+      prev.map((t) => {
+        const matching = filesToAccept.find((f) => f.path === t.path || f.path.endsWith(t.path) || t.path.endsWith(f.path));
+        if (matching && matching.modifiedContent !== undefined) {
+          return {
+            ...t,
+            content: matching.modifiedContent,
+            savedContent: matching.modifiedContent,
+            isModified: false,
+          };
+        }
+        return t;
+      })
+    );
+    const activeMatchAccept = filesToAccept.find((f) => f.path === activeFilePathRef.current || f.path.endsWith(activeFilePathRef.current) || activeFilePathRef.current.endsWith(f.path));
+    if (activeMatchAccept && activeMatchAccept.modifiedContent !== undefined) {
+      setCode(activeMatchAccept.modifiedContent);
+    }
+
     setDiffViewFile(null);
     loadProjectStructure();
-  }, [agentSession, workspace.path, getWorkspaceKey, persistChats, loadProjectStructure]);
+  }, [agentSession, workspace.path, getWorkspaceKey, persistChats, persistTasks, loadProjectStructure]);
 
   const handleRejectAll = useCallback((filesList?: ChangedFile[]) => {
     const filesToReject = filesList && filesList.length > 0
@@ -1472,58 +1933,88 @@ export default function AIIDE() {
       .catch(() => {});
 
     const paths = filesToReject.map(f => f.path);
-    setMessages((prev) =>
-      prev.map((msg) => {
-        const hasAny = msg.changedFiles?.some((f) => paths.length === 0 || paths.some((p) => f.path === p || f.path.endsWith(p) || p.endsWith(f.path)));
-        if (!hasAny) return msg;
-        const remaining = (msg.changedFiles || []).filter(
-          (f) => paths.length > 0 && !paths.some((p) => f.path === p || f.path.endsWith(p) || p.endsWith(f.path))
-        );
-        const updatedTags = { ...(msg.fileReviewTags || {}) };
-        const affectedFiles = paths.length > 0 ? paths : (msg.changedFiles || []).map(f => f.path);
-        for (const p of affectedFiles) {
-          updatedTags[p] = 'rejected';
-        }
-        return {
-          ...msg,
-          changedFiles: remaining.length > 0 ? remaining : undefined,
-          fileReviewTags: updatedTags,
-        };
-      })
-    );
+    const wsKey = getWorkspaceKey(workspace.path);
+    const wsTarget = workspace.path || '__global__';
 
+    // 1. Update active messages state & sync chat-history
+    setMessages((prev) => {
+      const updated = updateMessageListWithBulkReview(prev, paths, 'rejected');
+      axios.post(`${API}/workspace/chat-history`, {
+        workspace: wsTarget,
+        messages: updated,
+      }).catch(() => {});
+      return updated;
+    });
+
+    // 2. Update workspace chats cache & localStorage
     setChatsByWorkspace((prev) => {
-      const key = getWorkspaceKey(workspace.path);
-      const existing = prev[key] || [];
-      const updated = existing.map((msg) => {
-        const hasAny = msg.changedFiles?.some((f) => paths.length === 0 || paths.some((p) => f.path === p || f.path.endsWith(p) || p.endsWith(f.path)));
-        if (!hasAny) return msg;
-        const remaining = (msg.changedFiles || []).filter(
-          (f) => paths.length > 0 && !paths.some((p) => f.path === p || f.path.endsWith(p) || p.endsWith(f.path))
-        );
-        const updatedTags = { ...(msg.fileReviewTags || {}) };
-        const affectedFiles = paths.length > 0 ? paths : (msg.changedFiles || []).map(f => f.path);
-        for (const p of affectedFiles) {
-          updatedTags[p] = 'rejected';
-        }
-        return {
-          ...msg,
-          changedFiles: remaining.length > 0 ? remaining : undefined,
-          fileReviewTags: updatedTags,
-        };
-      });
-      const next = { ...prev, [key]: updated };
+      const existing = prev[wsKey] || [];
+      const updated = updateMessageListWithBulkReview(existing, paths, 'rejected');
+      const next = { ...prev, [wsKey]: updated };
       persistChats(next);
       return next;
+    });
+
+    // 3. Update tasks in history & backend
+    setTasksByWorkspace((prev) => {
+      const existing = prev[wsKey] || [];
+      const currentTaskId = activeTaskIdRef.current;
+      let anyTaskUpdated = false;
+      const nextList = existing.map((t) => {
+        const isCurrent = currentTaskId && t.id === currentTaskId;
+        const containsFile = t.messages?.some((m: any) =>
+          m.changedFiles?.some((f: any) => paths.length === 0 || paths.some((p: string) => f.path === p || f.path.endsWith(p) || p.endsWith(f.path)))
+        );
+        if (isCurrent || containsFile) {
+          anyTaskUpdated = true;
+          const updatedTask = {
+            ...t,
+            messages: updateMessageListWithBulkReview(t.messages || [], paths, 'rejected'),
+          };
+          axios.post(`${API}/workspace/tasks`, {
+            workspace: wsTarget,
+            task: updatedTask,
+          }).catch(() => {});
+          return updatedTask;
+        }
+        return t;
+      });
+      if (anyTaskUpdated) {
+        const next = { ...prev, [wsKey]: nextList };
+        persistTasks(next);
+        return next;
+      }
+      return prev;
     });
 
     setAgentSession((prev) => {
       if (!prev) return prev;
       return { ...prev, changedFiles: [], pendingChanges: [] };
     });
+
+    // Update open tabs
+    setOpenFiles((prev) =>
+      prev.map((t) => {
+        const matching = filesToReject.find((f) => f.path === t.path || f.path.endsWith(t.path) || t.path.endsWith(f.path));
+        if (matching && matching.originalContent !== undefined) {
+          return {
+            ...t,
+            content: matching.originalContent,
+            savedContent: matching.originalContent,
+            isModified: false,
+          };
+        }
+        return t;
+      })
+    );
+    const activeMatchReject = filesToReject.find((f) => f.path === activeFilePathRef.current || f.path.endsWith(activeFilePathRef.current) || activeFilePathRef.current.endsWith(f.path));
+    if (activeMatchReject && activeMatchReject.originalContent !== undefined) {
+      setCode(activeMatchReject.originalContent);
+    }
+
     setDiffViewFile(null);
     loadProjectStructure();
-  }, [agentSession, workspace.path, getWorkspaceKey, persistChats, loadProjectStructure]);
+  }, [agentSession, workspace.path, getWorkspaceKey, persistChats, persistTasks, loadProjectStructure]);
 
   const handleRefreshAgentSession = useCallback(() => {
     const wsKey = getWorkspaceKey(workspace.path);
@@ -1577,22 +2068,23 @@ export default function AIIDE() {
 
   const handleRestoreTask = useCallback((task: any) => {
     const wsKey = getWorkspaceKey(workspace.path);
+    const sanitizedMessages = sanitizeTaskMessages(task.messages || []);
 
     // Load selected task into active session without spurious auto-archiving
     activeTaskIdRef.current = task.id;
     setActiveTaskId(task.id);
-    setMessages(task.messages || []);
+    setMessages(sanitizedMessages);
     setAgentSession(null);
     setDiffViewFile(null);
     setChatsByWorkspace(prev => {
-      const next = { ...prev, [wsKey]: task.messages || [] };
+      const next = { ...prev, [wsKey]: sanitizedMessages };
       persistChats(next);
       return next;
     });
 
     axios.post(`${API}/workspace/chat-history`, {
       workspace: workspace.path || '__global__',
-      messages: task.messages || [],
+      messages: sanitizedMessages,
     }).catch(() => {});
 
     setIsHistoryOpen(false);
@@ -1901,51 +2393,95 @@ export default function AIIDE() {
               </>
             )}
           </div>
-          <div className="chat-scope-actions">
-            {/* History Button */}
+          <div className="chat-scope-actions" ref={chatMenuRef}>
+            {/* 3-Dot Menu Trigger Button */}
             <button
               ref={historyButtonRef}
               type="button"
-              className={`chat-history-btn ${isHistoryOpen ? 'active' : ''}`}
-              title="Task History (Load previous tasks)"
+              className={`chat-menu-trigger-btn ${isChatMenuOpen || isHistoryOpen ? 'active' : ''}`}
+              title="Chat Options (History, New Task, Clear)"
               onClick={(e) => {
                 e.stopPropagation();
-                setIsHistoryOpen(prev => !prev);
+                if (isHistoryOpen) {
+                  setIsHistoryOpen(false);
+                  setIsChatMenuOpen(false);
+                } else {
+                  setIsChatMenuOpen(prev => !prev);
+                }
               }}
             >
-              <History size={12} />
-              <span>History</span>
+              <MoreVertical size={16} />
               {(tasksByWorkspace[getWorkspaceKey(workspace.path)] || []).length > 0 && (
-                <span className="task-count-badge">
+                <span className="task-count-badge chat-menu-badge">
                   {(tasksByWorkspace[getWorkspaceKey(workspace.path)] || []).length}
                 </span>
               )}
             </button>
 
-            {/* New Task Button */}
-            <button
-              type="button"
-              className="chat-new-task-btn"
-              title="Start a new task (archives current task to history and clears chat)"
-              onClick={handleNewAgentSession}
-            >
-              <Plus size={12} />
-              <span>New Task</span>
-            </button>
-
-            {/* Clear Button */}
-            {messages.length > 0 && (
-              <button
-                type="button"
-                className="chat-clear-btn"
-                title="Clear current conversation"
-                onClick={handleClearChat}
+            {/* 3-Dot Options Dropdown */}
+            {isChatMenuOpen && (
+              <div
+                className="chat-options-dropdown"
+                onClick={(e) => e.stopPropagation()}
               >
-                <Trash2 size={12} />
-                <span>Clear</span>
-              </button>
+                {/* 1. History Option */}
+                <button
+                  type="button"
+                  className="chat-menu-item"
+                  onClick={() => {
+                    setIsChatMenuOpen(false);
+                    setIsHistoryOpen(true);
+                  }}
+                  title="Task History (Load previous tasks)"
+                >
+                  <div className="chat-menu-item-left">
+                    <History size={13} className="text-amber" />
+                    <span>History</span>
+                  </div>
+                  {(tasksByWorkspace[getWorkspaceKey(workspace.path)] || []).length > 0 && (
+                    <span className="task-count-badge">
+                      {(tasksByWorkspace[getWorkspaceKey(workspace.path)] || []).length}
+                    </span>
+                  )}
+                </button>
+
+                {/* 2. New Task Option */}
+                <button
+                  type="button"
+                  className="chat-menu-item"
+                  onClick={() => {
+                    setIsChatMenuOpen(false);
+                    handleNewAgentSession();
+                  }}
+                  title="Start a new task"
+                >
+                  <div className="chat-menu-item-left">
+                    <Plus size={13} className="text-blue" />
+                    <span>New Task</span>
+                  </div>
+                </button>
+
+                <div className="chat-menu-divider" />
+
+                {/* 3. Clear Chat Option */}
+                <button
+                  type="button"
+                  className={`chat-menu-item chat-menu-item-danger ${messages.length === 0 ? 'disabled' : ''}`}
+                  disabled={messages.length === 0}
+                  onClick={() => {
+                    if (messages.length === 0) return;
+                    setIsChatMenuOpen(false);
+                    handleClearChat();
+                  }}
+                  title="Clear current conversation"
+                >
+                  <div className="chat-menu-item-left">
+                    <Trash2 size={13} />
+                    <span>Clear</span>
+                  </div>
+                </button>
+              </div>
             )}
-          </div>
 
           {/* Task History Dropdown Menu */}
           {isHistoryOpen && (
@@ -2016,6 +2552,7 @@ export default function AIIDE() {
             </div>
           )}
         </div>
+      </div>
 
         {/* Chat */}
         <div className="chat-container">
@@ -2143,67 +2680,36 @@ export default function AIIDE() {
       {/* RIGHT PANEL */}
       <div className="panel-right">
         <div className="tab-bar">
-          <div className="tab-filename">
-            {diffViewFile ? `Diff: ${diffViewFile.path.split('/').pop() || diffViewFile.path}` : fileName}
-          </div>
-
-          {diffViewFile ? (
-            <div className="diff-viewer-actions">
-              <div className="diff-stat-pills">
-                <span className="diff-pill additions">+{diffViewFile.additions}</span>
-                <span className="diff-pill deletions">-{diffViewFile.deletions}</span>
-              </div>
-              <button
-                className="diff-action-btn btn-accept-diff"
-                onClick={() => handleAcceptChange(diffViewFile.path, diffViewFile)}
-                title="Accept changes in this file"
-              >
-                <Check size={12} />
-                <span>Accept file</span>
-              </button>
-              <button
-                className="diff-action-btn btn-reject-diff"
-                onClick={() => handleRejectChange(diffViewFile.path, diffViewFile)}
-                title="Reject changes and revert this file"
-              >
-                <RotateCcw size={12} />
-                <span>Reject file</span>
-              </button>
-              <button
-                className="diff-action-btn btn-close-diff"
-                onClick={handleCloseDiff}
-                title="Close diff and return to editor"
-              >
-                <X size={12} />
-                <span>Close Diff</span>
-              </button>
+          <div className="surface-info">
+            <div className="surface-tag">
+              {activeTab === 'code' ? (
+                <>
+                  <Code size={13} style={{ color: '#569cd6' }} />
+                  <span>Editor</span>
+                </>
+              ) : activeTab === 'browser' ? (
+                <>
+                  <Globe size={13} style={{ color: '#4ec9b0' }} />
+                  <span>Browser Preview</span>
+                </>
+              ) : activeTab === 'inspect' ? (
+                <>
+                  <Activity size={13} style={{ color: '#e5c07b' }} />
+                  <span>DevTools Inspector</span>
+                </>
+              ) : activeTab === 'images' ? (
+                <>
+                  <ImageIcon size={13} style={{ color: '#c586c0' }} />
+                  <span>Generated Images</span>
+                </>
+              ) : (
+                <>
+                  <FileText size={13} style={{ color: '#9cdcfe' }} />
+                  <span>Documentation</span>
+                </>
+              )}
             </div>
-          ) : (
-            activeTab === 'code' && (
-              <div className="tab-formatter-group">
-                <button
-                  className="tab-format-btn"
-                  onClick={() => handleFormatDocument()}
-                  title="Format Document (Shift+Alt+F)"
-                >
-                  <Sparkles size={12} />
-                  <span>Format</span>
-                </button>
-
-                <button
-                  className={`tab-formatter-badge ${activeFormatter ? (activeFormatter.installed ? 'installed' : 'unavailable') : ''}`}
-                  onClick={() => setFormatterModalOpen(true)}
-                  title="Click to configure formatter"
-                >
-                  <span>
-                    {activeLanguage} • {activeFormatter ? activeFormatter.name : 'No Formatter'}{' '}
-                    {activeFormatter ? (activeFormatter.installed ? '✓' : '⚠') : ''}
-                  </span>
-                  <Sliders size={11} className="tab-badge-icon" />
-                </button>
-              </div>
-            )
-          )}
+          </div>
 
           <div className="tab-spacer" />
 
@@ -2213,7 +2719,7 @@ export default function AIIDE() {
               setDiffViewFile(null);
               setActiveTab('code');
             }}
-            className={`tab-btn ${activeTab === 'code' && !diffViewFile ? 'tab-active' : ''}`}
+            className={`tab-btn ${activeTab === 'code' ? 'tab-active' : ''}`}
           >
             <Code size={14} /> Code
           </button>
@@ -2283,39 +2789,174 @@ export default function AIIDE() {
             />
           )}
 
-          {diffViewFile ? (
-            <DiffEditor
-              height="100%"
-              original={diffViewFile.originalContent}
-              modified={diffViewFile.modifiedContent}
-              language={getLanguageFromPath(diffViewFile.path)}
-              theme="vs-dark"
-              options={{
-                fontSize: 14,
-                readOnly: true,
-                automaticLayout: true,
-                minimap: { enabled: false },
-                renderSideBySide: true,
-                scrollBeyondLastLine: false,
-              }}
-            />
-          ) : activeTab === 'code' ? (
-            <Editor
-              height="100%"
-              path={activeFilePath || fileName || 'file.tsx'}
-              language={activeLanguage}
-              theme="vs-dark"
-              value={code}
-              onChange={(val) => setCode(val || '')}
-              beforeMount={handleBeforeMount}
-              options={{
-                fontSize: 14,
-                minimap: { enabled: false },
-                scrollBeyondLastLine: false,
-                automaticLayout: true,
-                renderValidationDecorations: 'off',
-              }}
-            />
+          {activeTab === 'code' ? (
+            <div className="code-editor-layout">
+              {/* TAB BAR INSIDE EDITOR BODY */}
+              <div className="editor-file-tabs-bar">
+                <div className="editor-tabs-scroll-container">
+                  {/* If Diff View is active, render a special diff tab */}
+                  {diffViewFile && (
+                    <div
+                      className="editor-file-tab active diff-active-tab"
+                      title={diffViewFile.path}
+                    >
+                      <GitCompare size={13} className="editor-tab-icon" style={{ color: '#d19a66' }} />
+                      <span className="editor-tab-name">Diff: {diffViewFile.path.split('/').pop() || diffViewFile.path}</span>
+                      <button
+                        className="editor-tab-close-btn"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleCloseDiff();
+                        }}
+                        title="Close Diff"
+                      >
+                        <X size={12} />
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Open File Tabs */}
+                  {openFiles.map((tab) => {
+                    const isActive = !diffViewFile && tab.path === activeFilePath;
+                    return (
+                      <div
+                        key={tab.path}
+                        className={`editor-file-tab ${isActive ? 'active' : ''}`}
+                        onClick={() => selectTab(tab.path)}
+                        title={tab.path}
+                      >
+                        <span className="editor-tab-icon">
+                          {getFileIcon(tab.name)}
+                        </span>
+                        <span className="editor-tab-name">{tab.name}</span>
+                        {tab.isModified && (
+                          <span className="editor-tab-dirty-indicator" title="Unsaved changes">●</span>
+                        )}
+                        <button
+                          className="editor-tab-close-btn"
+                          onClick={(e) => closeTab(tab.path, e)}
+                          title="Close tab (Cmd+W)"
+                        >
+                          <X size={12} />
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* Right actions inside editor tab bar */}
+                {diffViewFile ? (
+                  <div className="diff-viewer-actions">
+                    <div className="diff-stat-pills">
+                      <span className="diff-pill additions">+{diffViewFile.additions}</span>
+                      <span className="diff-pill deletions">-{diffViewFile.deletions}</span>
+                    </div>
+                    {diffViewFile.status === 'pending' && (
+                      <>
+                        <button
+                          className="diff-action-btn btn-accept-diff"
+                          onClick={() => handleAcceptChange(diffViewFile.path, diffViewFile)}
+                          title="Accept changes in this file"
+                        >
+                          <Check size={12} />
+                          <span>Accept file</span>
+                        </button>
+                        <button
+                          className="diff-action-btn btn-reject-diff"
+                          onClick={() => handleRejectChange(diffViewFile.path, diffViewFile)}
+                          title="Reject changes and revert this file"
+                        >
+                          <RotateCcw size={12} />
+                          <span>Reject file</span>
+                        </button>
+                      </>
+                    )}
+                    <button
+                      className="diff-action-btn btn-close-diff"
+                      onClick={handleCloseDiff}
+                      title="Close diff and return to editor"
+                    >
+                      <X size={12} />
+                      <span>Close Diff</span>
+                    </button>
+                  </div>
+                ) : (
+                  <div className="tab-formatter-group">
+                    <button
+                      className="tab-format-btn"
+                      onClick={() => handleFormatDocument()}
+                      title="Format Document (Shift+Alt+F)"
+                    >
+                      <Sparkles size={12} />
+                      <span>Format</span>
+                    </button>
+
+                    <button
+                      className={`tab-formatter-badge ${activeFormatter ? (activeFormatter.installed ? 'installed' : 'unavailable') : ''}`}
+                      onClick={() => setFormatterModalOpen(true)}
+                      title="Click to configure formatter"
+                    >
+                      <span>
+                        {activeLanguage} • {activeFormatter ? activeFormatter.name : 'No Formatter'}{' '}
+                        {activeFormatter ? (activeFormatter.installed ? '✓' : '⚠') : ''}
+                      </span>
+                      <Sliders size={11} className="tab-badge-icon" />
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {/* EDITOR CONTENT WRAPPER */}
+              <div className="editor-content-wrapper">
+                {diffViewFile ? (
+                  <DiffEditor
+                    height="100%"
+                    original={diffViewFile.originalContent}
+                    modified={diffViewFile.modifiedContent}
+                    language={getLanguageFromPath(diffViewFile.path)}
+                    theme="vs-dark"
+                    options={{
+                      fontSize: 14,
+                      readOnly: true,
+                      automaticLayout: true,
+                      minimap: { enabled: false },
+                      renderSideBySide: true,
+                      scrollBeyondLastLine: false,
+                    }}
+                  />
+                ) : openFiles.length === 0 ? (
+                  <div className="editor-empty-state">
+                    <div className="editor-empty-icon-box">
+                      <FileCode size={32} />
+                    </div>
+                    <div className="editor-empty-title">No File Open</div>
+                    <div className="editor-empty-sub">
+                      Select a file from the explorer on the left or ask the AI agent to edit or create a file.
+                    </div>
+                    <div className="editor-empty-hint">
+                      Tip: Use <kbd>Cmd</kbd> + <kbd>S</kbd> to save changes, <kbd>Cmd</kbd> + <kbd>W</kbd> to close tabs.
+                    </div>
+                  </div>
+                ) : (
+                  <Editor
+                    height="100%"
+                    path={activeFilePath || fileName || 'file.tsx'}
+                    language={activeLanguage}
+                    theme="vs-dark"
+                    value={code}
+                    onChange={handleEditorChange}
+                    beforeMount={handleBeforeMount}
+                    options={{
+                      fontSize: 14,
+                      minimap: { enabled: false },
+                      scrollBeyondLastLine: false,
+                      automaticLayout: true,
+                      renderValidationDecorations: 'off',
+                    }}
+                  />
+                )}
+              </div>
+            </div>
           ) : activeTab === 'browser' ? (
             <BrowserPanel
               tabs={browserTabs}

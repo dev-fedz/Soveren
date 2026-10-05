@@ -347,6 +347,41 @@ const tasksFile = path.join(
   'tasks.json'
 );
 
+function sanitizeBackendTaskMessages(messages: any[]): any[] {
+  if (!Array.isArray(messages)) return [];
+  return messages.map((msg) => {
+    if (!msg || typeof msg !== 'object') return msg;
+    const reviewTags = { ...(msg.fileReviewTags || {}) };
+    let changedFiles = Array.isArray(msg.changedFiles) ? [...msg.changedFiles] : undefined;
+
+    if (changedFiles && changedFiles.length > 0) {
+      const reviewed = changedFiles.filter((f: any) => f && (f.status === 'accepted' || f.status === 'rejected'));
+      for (const rf of reviewed) {
+        if (rf.path) {
+          reviewTags[rf.path] = rf.status;
+        }
+      }
+    }
+
+    if (changedFiles && Object.keys(reviewTags).length > 0) {
+      changedFiles = changedFiles.filter((f: any) => {
+        if (!f || !f.path) return false;
+        const isReviewed = Object.keys(reviewTags).some(
+          (p) => p === f.path || p.endsWith(f.path) || f.path.endsWith(p)
+        );
+        return !isReviewed;
+      });
+      if (changedFiles.length === 0) changedFiles = undefined;
+    }
+
+    return {
+      ...msg,
+      changedFiles,
+      fileReviewTags: Object.keys(reviewTags).length > 0 ? reviewTags : undefined,
+    };
+  });
+}
+
 function sanitizeBackendTasks(list: any[]): SavedTask[] {
   if (!Array.isArray(list)) return [];
   const sorted = [...list].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
@@ -366,7 +401,10 @@ function sanitizeBackendTasks(list: any[]): SavedTask[] {
     if (!seenIds.has(item.id) && !seenKeys.has(dedupKey)) {
       seenIds.add(item.id);
       seenKeys.add(dedupKey);
-      result.push(item);
+      result.push({
+        ...item,
+        messages: sanitizeBackendTaskMessages(msgs),
+      });
     }
   }
   return result;
@@ -664,6 +702,31 @@ app.get('/file-content', async (req, res) => {
 
     const content = await fs.readFile(absolutePath, 'utf8');
     res.json({ content });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/file-content', async (req, res) => {
+  try {
+    const { path: filePath, content } = req.body;
+    if (!filePath) throw new Error('Path is required');
+
+    const workspace = workspaceManager.getState();
+    let absolutePath: string;
+
+    if (workspace.path) {
+      absolutePath = path.resolve(workspace.path, filePath);
+      if (!absolutePath.startsWith(workspace.path)) {
+        return res.status(403).json({ error: 'Access denied: path outside workspace' });
+      }
+    } else {
+      absolutePath = path.resolve(filePath);
+    }
+
+    await fs.mkdir(path.dirname(absolutePath), { recursive: true });
+    await fs.writeFile(absolutePath, content ?? '', 'utf8');
+    res.json({ status: 'ok', path: filePath });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }

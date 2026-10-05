@@ -498,10 +498,103 @@ body {
   border: 1px solid rgba(97, 175, 239, 0.35);
 }
 
-.chat-scope-actions {
+
+
+/* === 3-DOT CHAT MENU === */
+.chat-menu-trigger-btn {
   display: flex;
   align-items: center;
-  gap: 6px;
+  justify-content: center;
+  gap: 5px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: #a0a0a0;
+  cursor: pointer;
+  padding: 4px 6px;
+  border-radius: 5px;
+  transition: all 0.15s ease;
+  position: relative;
+}
+
+.chat-menu-trigger-btn:hover,
+.chat-menu-trigger-btn.active {
+  background: rgba(255, 255, 255, 0.12);
+  color: #ffffff;
+  border-color: rgba(255, 255, 255, 0.25);
+}
+
+.chat-menu-badge {
+  background: rgba(229, 192, 123, 0.3);
+  color: #e5c07b;
+  font-size: 9px;
+  font-weight: 700;
+  padding: 0 4px;
+  border-radius: 8px;
+  min-width: 14px;
+  text-align: center;
+  line-height: 14px;
+}
+
+.chat-options-dropdown {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  width: 170px;
+  background: #1e1e1e;
+  border: 1px solid #3c3c3c;
+  border-radius: 8px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.7);
+  z-index: 9999;
+  padding: 5px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  animation: fadeInTaskDropdown 0.15s ease-out;
+}
+
+.chat-menu-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  background: transparent;
+  border: none;
+  border-radius: 5px;
+  color: #cccccc;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.12s ease;
+  text-align: left;
+}
+
+.chat-menu-item:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.08);
+  color: #ffffff;
+}
+
+.chat-menu-item:disabled,
+.chat-menu-item.disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.chat-menu-item-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.chat-menu-item-danger:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.18);
+  color: #f87171;
+}
+
+.chat-menu-divider {
+  height: 1px;
+  background: #333333;
+  margin: 3px 4px;
 }
 
 .chat-new-task-btn {
@@ -581,7 +674,7 @@ body {
 .task-history-dropdown {
   position: absolute;
   top: calc(100% + 6px);
-  right: 12px;
+  right: 0;
   width: 320px;
   background: #1e1e1e;
   border: 1px solid #3c3c3c;
@@ -1217,6 +1310,215 @@ body {
   flex: 1;
   position: relative;
   overflow: hidden;
+}
+
+/* === CODE EDITOR LAYOUT & FILE TABS === */
+.code-editor-layout {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  width: 100%;
+  background: #1e1e1e;
+}
+
+.editor-file-tabs-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: #252526;
+  border-bottom: 1px solid #1e1e1e;
+  height: 36px;
+  min-height: 36px;
+  overflow: hidden;
+  user-select: none;
+}
+
+.editor-tabs-scroll-container {
+  display: flex;
+  align-items: stretch;
+  height: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  white-space: nowrap;
+  scrollbar-width: thin;
+  scrollbar-color: #3e3e42 transparent;
+  flex: 1;
+}
+
+.editor-tabs-scroll-container::-webkit-scrollbar {
+  height: 3px;
+}
+
+.editor-tabs-scroll-container::-webkit-scrollbar-thumb {
+  background: #3e3e42;
+  border-radius: 2px;
+}
+
+.editor-file-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 10px 0 12px;
+  height: 100%;
+  font-size: 13px;
+  color: #969696;
+  background: #2d2d2d;
+  border-right: 1px solid #222222;
+  border-top: 2px solid transparent;
+  cursor: pointer;
+  transition: all 0.12s ease;
+  position: relative;
+  flex-shrink: 0;
+  max-width: 220px;
+}
+
+.editor-file-tab:hover {
+  background: #282828;
+  color: #cccccc;
+}
+
+.editor-file-tab.active {
+  background: #1e1e1e;
+  color: #ffffff;
+  border-top-color: #007acc;
+  font-weight: 500;
+}
+
+.editor-file-tab.diff-active-tab {
+  border-top-color: #d19a66;
+  background: #23221e;
+}
+
+.editor-tab-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.editor-tab-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 12px;
+}
+
+.editor-tab-dirty-indicator {
+  color: #d19a66;
+  font-size: 10px;
+  line-height: 1;
+  margin-left: 2px;
+}
+
+.editor-tab-close-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 3px;
+  background: transparent;
+  border: none;
+  color: #858585;
+  cursor: pointer;
+  padding: 0;
+  margin-left: 4px;
+  opacity: 0.6;
+  transition: all 0.12s ease;
+}
+
+.editor-file-tab:hover .editor-tab-close-btn,
+.editor-file-tab.active .editor-tab-close-btn {
+  opacity: 0.9;
+}
+
+.editor-tab-close-btn:hover {
+  opacity: 1 !important;
+  background: rgba(255, 255, 255, 0.12);
+  color: #ffffff;
+}
+
+.editor-content-wrapper {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+  height: calc(100% - 36px);
+}
+
+/* Empty Editor State */
+.editor-empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  width: 100%;
+  background: #1e1e1e;
+  color: #858585;
+  text-align: center;
+  padding: 40px 20px;
+}
+
+.editor-empty-icon-box {
+  width: 68px;
+  height: 68px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px dashed rgba(255, 255, 255, 0.12);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 18px;
+  color: #666666;
+}
+
+.editor-empty-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: #cccccc;
+  margin-bottom: 6px;
+}
+
+.editor-empty-sub {
+  font-size: 13px;
+  color: #777777;
+  max-width: 400px;
+  line-height: 1.5;
+  margin-bottom: 20px;
+}
+
+.editor-empty-hint {
+  font-size: 11px;
+  color: #666666;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  padding: 6px 14px;
+  border-radius: 6px;
+}
+
+.editor-empty-hint kbd {
+  background: #2d2d2d;
+  color: #cccccc;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 10px;
+  border: 1px solid #3c3c3c;
+  margin: 0 2px;
+}
+
+.surface-info {
+  display: flex;
+  align-items: center;
+  padding-left: 14px;
+}
+
+.surface-tag {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #cccccc;
 }
 
 .preview-iframe {
