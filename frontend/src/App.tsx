@@ -137,6 +137,28 @@ function getSocket(): Socket {
   return socket;
 }
 
+function sanitizeTaskHistoryList(list: any[]): any[] {
+  if (!Array.isArray(list)) return [];
+  const sorted = [...list].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+  const seenIds = new Set<string>();
+  const seenKeys = new Set<string>();
+  const deduped: any[] = [];
+  for (const task of sorted) {
+    if (!task || !task.id) continue;
+    const msgs = Array.isArray(task.messages) ? task.messages : [];
+    // Only recognize as part of history if the user input a chat to the agent
+    const firstUserMsg = msgs.find((m: any) => m.role === 'user' && m.content && String(m.content).trim());
+    if (!firstUserMsg) continue;
+    const dedupKey = `${String(task.title || '').trim().toLowerCase()}::${String(firstUserMsg.content || '').trim().toLowerCase()}`;
+    if (!seenIds.has(task.id) && !seenKeys.has(dedupKey)) {
+      seenIds.add(task.id);
+      seenKeys.add(dedupKey);
+      deduped.push(task);
+    }
+  }
+  return deduped;
+}
+
 export default function AIIDE() {
   // --- State ---
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -319,6 +341,14 @@ export default function AIIDE() {
     }
   });
 
+  // Active task ID for current session (null = brand new unsaved session)
+  const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
+  const activeTaskIdRef = useRef<string | null>(null);
+  activeTaskIdRef.current = activeTaskId;
+
+  // Sanitize and deduplicate task history: a task is ONLY valid if the user input a chat to the agent!
+  const sanitizeTaskList = useCallback((list: any[]): any[] => sanitizeTaskHistoryList(list), []);
+
   // Task History cache per workspace
   const [tasksByWorkspace, setTasksByWorkspace] = useState<Record<string, {
     id: string;
@@ -329,13 +359,23 @@ export default function AIIDE() {
   }[]>>(() => {
     try {
       const saved = localStorage.getItem('ai_ide_task_history');
-      return saved ? JSON.parse(saved) : {};
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        const cleaned: Record<string, any[]> = {};
+        for (const [k, v] of Object.entries(parsed)) {
+          if (!Array.isArray(v)) continue;
+          cleaned[k] = sanitizeTaskHistoryList(v);
+        }
+        return cleaned;
+      }
+      return {};
     } catch {
       return {};
     }
   });
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const historyDropdownRef = useRef<HTMLDivElement>(null);
+  const historyButtonRef = useRef<HTMLButtonElement>(null);
 
   const persistTasks = useCallback((updatedTasks: Record<string, any[]>) => {
     try {
@@ -397,7 +437,34 @@ export default function AIIDE() {
       persistChats(next);
       return next;
     });
-  }, [getWorkspaceKey, persistChats]);
+
+    if (isCurrent && activeTaskIdRef.current) {
+      const currentId = activeTaskIdRef.current;
+      setTasksByWorkspace(prev => {
+        const existing = prev[key] || [];
+        let updatedTask: any = null;
+        const nextList = existing.map(t => {
+          if (t.id === currentId) {
+            updatedTask = {
+              ...t,
+              timestamp: Date.now(),
+              messages: [...t.messages, msg],
+            };
+            return updatedTask;
+          }
+          return t;
+        });
+        if (updatedTask) {
+          axios.post(`${API}/workspace/tasks`, {
+            workspace: workspaceRef.current.path || '__global__',
+            task: updatedTask,
+          }).catch(() => {});
+        }
+        persistTasks({ ...prev, [key]: nextList });
+        return { ...prev, [key]: nextList };
+      });
+    }
+  }, [getWorkspaceKey, persistChats, persistTasks]);
 
   // --- Load project files ---
   const loadProjectStructure = useCallback(async () => {
@@ -832,12 +899,7 @@ export default function AIIDE() {
         if (res.data?.tasks && Array.isArray(res.data.tasks)) {
           setTasksByWorkspace(prev => {
             const currentList = prev[newKey] || [];
-            const merged = [...currentList];
-            for (const t of res.data.tasks) {
-              if (!merged.some(x => x.id === t.id)) {
-                merged.push(t);
-              }
-            }
+            const merged = sanitizeTaskList([...res.data.tasks, ...currentList]);
             merged.sort((a, b) => b.timestamp - a.timestamp);
             const next = { ...prev, [newKey]: merged };
             persistTasks(next);
@@ -848,13 +910,19 @@ export default function AIIDE() {
       .catch(() => {});
 
     loadProjectStructure();
-  }, [workspace.path, getWorkspaceKey, loadProjectStructure, persistChats, persistTasks]);
+  }, [workspace.path, getWorkspaceKey, loadProjectStructure, persistChats, persistTasks, sanitizeTaskList]);
 
   // Close Task History dropdown on outside click
   useEffect(() => {
     if (!isHistoryOpen) return;
     const handleClickOutside = (e: MouseEvent) => {
-      if (historyDropdownRef.current && !historyDropdownRef.current.contains(e.target as Node)) {
+      const target = e.target as Node;
+      if (
+        historyDropdownRef.current &&
+        !historyDropdownRef.current.contains(target) &&
+        historyButtonRef.current &&
+        !historyButtonRef.current.contains(target)
+      ) {
         setIsHistoryOpen(false);
       }
     };
@@ -971,6 +1039,35 @@ export default function AIIDE() {
     }
   }, []);
 
+  const handleInstallFormatter = useCallback(async (id: string) => {
+    try {
+      const res = await axios.post(`${API}/formatters/install/${id}`);
+      if (res.data?.formatters) {
+        setAllFormatters(res.data.formatters);
+      } else {
+        const fRes = await axios.get(`${API}/formatters`);
+        if (fRes.data?.formatters) {
+          setAllFormatters(fRes.data.formatters);
+        }
+      }
+      setFormatterToast({
+        type: 'success',
+        text: `Formatter ${id} installed successfully ✓`,
+      });
+      setTimeout(() => {
+        setFormatterToast((prev) => (prev?.type === 'success' ? null : prev));
+      }, 3000);
+    } catch (err: any) {
+      console.error(`[Format] Failed to install formatter ${id}:`, err);
+      const errMsg = err?.response?.data?.error || err?.message || 'Installation failed';
+      setFormatterToast({
+        type: 'error',
+        text: `Failed to install ${id}: ${errMsg}`,
+      });
+      throw err;
+    }
+  }, []);
+
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       // Shift + Alt + F (or Shift + Option + F on Mac)
@@ -996,9 +1093,39 @@ export default function AIIDE() {
   // --- Handlers ---
   const handleSend = useCallback(async () => {
     if (!input.trim()) return;
-    const text = input;
+    const text = input.trim();
     setInput('');
-    addMessage({ role: 'user', content: text });
+    const userMsg: ChatMessage = { role: 'user', content: text };
+    addMessage(userMsg);
+
+    const wsKey = getWorkspaceKey(workspace.path);
+
+    // CRITICAL: A task is ONLY recognized as part of history when the user inputs a chat to the agent!
+    let currentTaskId = activeTaskIdRef.current;
+    if (!currentTaskId) {
+      currentTaskId = `task_${Date.now()}`;
+      activeTaskIdRef.current = currentTaskId;
+      setActiveTaskId(currentTaskId);
+      const cleanTitle = text.replace(/\n+/g, ' ').trim().slice(0, 50) || 'Task';
+      const newTask = {
+        id: currentTaskId,
+        title: cleanTitle,
+        timestamp: Date.now(),
+        messages: [userMsg],
+        workspaceKey: wsKey,
+      };
+      setTasksByWorkspace(prev => {
+        const existing = prev[wsKey] || [];
+        const nextList = [newTask, ...existing.filter(t => t.id !== currentTaskId)].slice(0, 50);
+        const next = { ...prev, [wsKey]: nextList };
+        persistTasks(next);
+        return next;
+      });
+      axios.post(`${API}/workspace/tasks`, {
+        workspace: workspace.path || '__global__',
+        task: newTask,
+      }).catch(() => {});
+    }
 
     // Reset activities for new turn so previous turn's activities remain with its message
     setAgentSession((prev) =>
@@ -1019,7 +1146,7 @@ export default function AIIDE() {
       workspace: workspace,
       history: messages.slice(-10).map(m => ({ role: m.role, content: m.content })),
     });
-  }, [input, workspace, messages, addMessage]);
+  }, [input, workspace, messages, addMessage, getWorkspaceKey, persistTasks]);
 
   const handleOpenProject = useCallback(() => {
     setPickerMode('open');
@@ -1118,61 +1245,285 @@ export default function AIIDE() {
     setDiffViewFile(null);
   }, []);
 
-  const handleAcceptChange = useCallback((filePath: string) => {
+  const handleAcceptChange = useCallback((filePath: string, fileObj?: ChangedFile) => {
+    const targetFile = fileObj || agentSession?.changedFiles?.find(f => f.path === filePath || f.path.endsWith(filePath) || filePath.endsWith(f.path));
+    const payload = {
+      path: filePath,
+      modifiedContent: targetFile?.modifiedContent,
+      workspace: workspace.path,
+    };
     const sock = socketRef.current || getSocket();
-    sock.emit('accept_change', { path: filePath });
+    sock.emit('accept_change', payload);
     axios
-      .post(`${API}/ai/agent/accept-change`, { path: filePath })
+      .post(`${API}/ai/agent/accept-change`, payload)
       .then((res) => {
         if (res.data?.session) setAgentSession(res.data.session);
-        if (diffViewFile?.path === filePath) {
-          setDiffViewFile((prev) => (prev ? { ...prev, status: 'accepted' } : null));
-        }
       })
       .catch(() => {});
-  }, [diffViewFile]);
 
-  const handleRejectChange = useCallback((filePath: string) => {
-    const sock = socketRef.current || getSocket();
-    sock.emit('reject_change', { path: filePath });
-    axios
-      .post(`${API}/ai/agent/reject-change`, { path: filePath })
-      .then((res) => {
-        if (res.data?.session) setAgentSession(res.data.session);
-        if (diffViewFile?.path === filePath) {
-          setDiffViewFile(null);
-        }
-        loadProjectStructure();
+    // Update React state: remove file from changedFiles and add 'accepted' tag
+    setMessages((prev) =>
+      prev.map((msg) => {
+        const hasFile = msg.changedFiles?.some((f) => f.path === filePath || f.path.endsWith(filePath) || filePath.endsWith(f.path));
+        if (!hasFile) return msg;
+        const remaining = (msg.changedFiles || []).filter(
+          (f) => f.path !== filePath && !f.path.endsWith(filePath) && !filePath.endsWith(f.path)
+        );
+        const updatedTags = { ...(msg.fileReviewTags || {}), [filePath]: 'accepted' as const };
+        return {
+          ...msg,
+          changedFiles: remaining.length > 0 ? remaining : undefined,
+          fileReviewTags: updatedTags,
+        };
       })
-      .catch(() => {});
-  }, [diffViewFile, loadProjectStructure]);
+    );
 
-  const handleAcceptAll = useCallback(() => {
-    const sock = socketRef.current || getSocket();
-    sock.emit('accept_all_changes');
-    axios
-      .post(`${API}/ai/agent/accept-all`)
-      .then((res) => {
-        if (res.data?.session) setAgentSession(res.data.session);
-        if (diffViewFile) {
-          setDiffViewFile((prev) => (prev ? { ...prev, status: 'accepted' } : null));
-        }
-      })
-      .catch(() => {});
-  }, [diffViewFile]);
+    setChatsByWorkspace((prev) => {
+      const key = getWorkspaceKey(workspace.path);
+      const existing = prev[key] || [];
+      const updated = existing.map((msg) => {
+        const hasFile = msg.changedFiles?.some((f) => f.path === filePath || f.path.endsWith(filePath) || filePath.endsWith(f.path));
+        if (!hasFile) return msg;
+        const remaining = (msg.changedFiles || []).filter(
+          (f) => f.path !== filePath && !f.path.endsWith(filePath) && !filePath.endsWith(f.path)
+        );
+        const updatedTags = { ...(msg.fileReviewTags || {}), [filePath]: 'accepted' as const };
+        return {
+          ...msg,
+          changedFiles: remaining.length > 0 ? remaining : undefined,
+          fileReviewTags: updatedTags,
+        };
+      });
+      const next = { ...prev, [key]: updated };
+      persistChats(next);
+      return next;
+    });
 
-  const handleRejectAll = useCallback(() => {
+    setAgentSession((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        changedFiles: (prev.changedFiles || []).filter(f => f.path !== filePath && !f.path.endsWith(filePath) && !filePath.endsWith(f.path)),
+        pendingChanges: (prev.pendingChanges || []).filter(f => f.path !== filePath && !f.path.endsWith(filePath) && !filePath.endsWith(f.path)),
+      };
+    });
+
+    if (diffViewFile?.path === filePath || diffViewFile?.path.endsWith(filePath) || filePath.endsWith(diffViewFile?.path || '')) {
+      setDiffViewFile(null);
+    }
+    loadProjectStructure();
+  }, [agentSession, diffViewFile, workspace.path, getWorkspaceKey, persistChats, loadProjectStructure]);
+
+  const handleRejectChange = useCallback((filePath: string, fileObj?: ChangedFile) => {
+    const targetFile = fileObj || agentSession?.changedFiles?.find(f => f.path === filePath || f.path.endsWith(filePath) || filePath.endsWith(f.path));
+    const payload = {
+      path: filePath,
+      originalContent: targetFile?.originalContent,
+      workspace: workspace.path,
+    };
     const sock = socketRef.current || getSocket();
-    sock.emit('reject_all_changes');
+    sock.emit('reject_change', payload);
     axios
-      .post(`${API}/ai/agent/reject-all`)
+      .post(`${API}/ai/agent/reject-change`, payload)
       .then((res) => {
         if (res.data?.session) setAgentSession(res.data.session);
-        setDiffViewFile(null);
-        loadProjectStructure();
       })
       .catch(() => {});
-  }, [loadProjectStructure]);
+
+    // Update React state: remove file from changedFiles and add 'rejected' tag
+    setMessages((prev) =>
+      prev.map((msg) => {
+        const hasFile = msg.changedFiles?.some((f) => f.path === filePath || f.path.endsWith(filePath) || filePath.endsWith(f.path));
+        if (!hasFile) return msg;
+        const remaining = (msg.changedFiles || []).filter(
+          (f) => f.path !== filePath && !f.path.endsWith(filePath) && !filePath.endsWith(f.path)
+        );
+        const updatedTags = { ...(msg.fileReviewTags || {}), [filePath]: 'rejected' as const };
+        return {
+          ...msg,
+          changedFiles: remaining.length > 0 ? remaining : undefined,
+          fileReviewTags: updatedTags,
+        };
+      })
+    );
+
+    setChatsByWorkspace((prev) => {
+      const key = getWorkspaceKey(workspace.path);
+      const existing = prev[key] || [];
+      const updated = existing.map((msg) => {
+        const hasFile = msg.changedFiles?.some((f) => f.path === filePath || f.path.endsWith(filePath) || filePath.endsWith(f.path));
+        if (!hasFile) return msg;
+        const remaining = (msg.changedFiles || []).filter(
+          (f) => f.path !== filePath && !f.path.endsWith(filePath) && !filePath.endsWith(f.path)
+        );
+        const updatedTags = { ...(msg.fileReviewTags || {}), [filePath]: 'rejected' as const };
+        return {
+          ...msg,
+          changedFiles: remaining.length > 0 ? remaining : undefined,
+          fileReviewTags: updatedTags,
+        };
+      });
+      const next = { ...prev, [key]: updated };
+      persistChats(next);
+      return next;
+    });
+
+    setAgentSession((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        changedFiles: (prev.changedFiles || []).filter(f => f.path !== filePath && !f.path.endsWith(filePath) && !filePath.endsWith(f.path)),
+        pendingChanges: (prev.pendingChanges || []).filter(f => f.path !== filePath && !f.path.endsWith(filePath) && !filePath.endsWith(f.path)),
+      };
+    });
+
+    if (diffViewFile?.path === filePath || diffViewFile?.path.endsWith(filePath) || filePath.endsWith(diffViewFile?.path || '')) {
+      setDiffViewFile(null);
+    }
+    loadProjectStructure();
+  }, [agentSession, diffViewFile, workspace.path, getWorkspaceKey, persistChats, loadProjectStructure]);
+
+  const handleAcceptAll = useCallback((filesList?: ChangedFile[]) => {
+    const filesToAccept = filesList && filesList.length > 0
+      ? filesList
+      : (agentSession?.changedFiles && agentSession.changedFiles.length > 0 ? agentSession.changedFiles : []);
+    const payload = {
+      files: filesToAccept,
+      workspace: workspace.path,
+    };
+    const sock = socketRef.current || getSocket();
+    sock.emit('accept_all_changes', payload);
+    axios
+      .post(`${API}/ai/agent/accept-all`, payload)
+      .then((res) => {
+        if (res.data?.session) setAgentSession(res.data.session);
+      })
+      .catch(() => {});
+
+    const paths = filesToAccept.map(f => f.path);
+    setMessages((prev) =>
+      prev.map((msg) => {
+        const hasAny = msg.changedFiles?.some((f) => paths.length === 0 || paths.some((p) => f.path === p || f.path.endsWith(p) || p.endsWith(f.path)));
+        if (!hasAny) return msg;
+        const remaining = (msg.changedFiles || []).filter(
+          (f) => paths.length > 0 && !paths.some((p) => f.path === p || f.path.endsWith(p) || p.endsWith(f.path))
+        );
+        const updatedTags = { ...(msg.fileReviewTags || {}) };
+        const affectedFiles = paths.length > 0 ? paths : (msg.changedFiles || []).map(f => f.path);
+        for (const p of affectedFiles) {
+          updatedTags[p] = 'accepted';
+        }
+        return {
+          ...msg,
+          changedFiles: remaining.length > 0 ? remaining : undefined,
+          fileReviewTags: updatedTags,
+        };
+      })
+    );
+
+    setChatsByWorkspace((prev) => {
+      const key = getWorkspaceKey(workspace.path);
+      const existing = prev[key] || [];
+      const updated = existing.map((msg) => {
+        const hasAny = msg.changedFiles?.some((f) => paths.length === 0 || paths.some((p) => f.path === p || f.path.endsWith(p) || p.endsWith(f.path)));
+        if (!hasAny) return msg;
+        const remaining = (msg.changedFiles || []).filter(
+          (f) => paths.length > 0 && !paths.some((p) => f.path === p || f.path.endsWith(p) || p.endsWith(f.path))
+        );
+        const updatedTags = { ...(msg.fileReviewTags || {}) };
+        const affectedFiles = paths.length > 0 ? paths : (msg.changedFiles || []).map(f => f.path);
+        for (const p of affectedFiles) {
+          updatedTags[p] = 'accepted';
+        }
+        return {
+          ...msg,
+          changedFiles: remaining.length > 0 ? remaining : undefined,
+          fileReviewTags: updatedTags,
+        };
+      });
+      const next = { ...prev, [key]: updated };
+      persistChats(next);
+      return next;
+    });
+
+    setAgentSession((prev) => {
+      if (!prev) return prev;
+      return { ...prev, changedFiles: [], pendingChanges: [] };
+    });
+    setDiffViewFile(null);
+    loadProjectStructure();
+  }, [agentSession, workspace.path, getWorkspaceKey, persistChats, loadProjectStructure]);
+
+  const handleRejectAll = useCallback((filesList?: ChangedFile[]) => {
+    const filesToReject = filesList && filesList.length > 0
+      ? filesList
+      : (agentSession?.changedFiles && agentSession.changedFiles.length > 0 ? agentSession.changedFiles : []);
+    const payload = {
+      files: filesToReject,
+      workspace: workspace.path,
+    };
+    const sock = socketRef.current || getSocket();
+    sock.emit('reject_all_changes', payload);
+    axios
+      .post(`${API}/ai/agent/reject-all`, payload)
+      .then((res) => {
+        if (res.data?.session) setAgentSession(res.data.session);
+      })
+      .catch(() => {});
+
+    const paths = filesToReject.map(f => f.path);
+    setMessages((prev) =>
+      prev.map((msg) => {
+        const hasAny = msg.changedFiles?.some((f) => paths.length === 0 || paths.some((p) => f.path === p || f.path.endsWith(p) || p.endsWith(f.path)));
+        if (!hasAny) return msg;
+        const remaining = (msg.changedFiles || []).filter(
+          (f) => paths.length > 0 && !paths.some((p) => f.path === p || f.path.endsWith(p) || p.endsWith(f.path))
+        );
+        const updatedTags = { ...(msg.fileReviewTags || {}) };
+        const affectedFiles = paths.length > 0 ? paths : (msg.changedFiles || []).map(f => f.path);
+        for (const p of affectedFiles) {
+          updatedTags[p] = 'rejected';
+        }
+        return {
+          ...msg,
+          changedFiles: remaining.length > 0 ? remaining : undefined,
+          fileReviewTags: updatedTags,
+        };
+      })
+    );
+
+    setChatsByWorkspace((prev) => {
+      const key = getWorkspaceKey(workspace.path);
+      const existing = prev[key] || [];
+      const updated = existing.map((msg) => {
+        const hasAny = msg.changedFiles?.some((f) => paths.length === 0 || paths.some((p) => f.path === p || f.path.endsWith(p) || p.endsWith(f.path)));
+        if (!hasAny) return msg;
+        const remaining = (msg.changedFiles || []).filter(
+          (f) => paths.length > 0 && !paths.some((p) => f.path === p || f.path.endsWith(p) || p.endsWith(f.path))
+        );
+        const updatedTags = { ...(msg.fileReviewTags || {}) };
+        const affectedFiles = paths.length > 0 ? paths : (msg.changedFiles || []).map(f => f.path);
+        for (const p of affectedFiles) {
+          updatedTags[p] = 'rejected';
+        }
+        return {
+          ...msg,
+          changedFiles: remaining.length > 0 ? remaining : undefined,
+          fileReviewTags: updatedTags,
+        };
+      });
+      const next = { ...prev, [key]: updated };
+      persistChats(next);
+      return next;
+    });
+
+    setAgentSession((prev) => {
+      if (!prev) return prev;
+      return { ...prev, changedFiles: [], pendingChanges: [] };
+    });
+    setDiffViewFile(null);
+    loadProjectStructure();
+  }, [agentSession, workspace.path, getWorkspaceKey, persistChats, loadProjectStructure]);
 
   const handleRefreshAgentSession = useCallback(() => {
     const wsKey = getWorkspaceKey(workspace.path);
@@ -1196,34 +1547,10 @@ export default function AIIDE() {
   const handleNewAgentSession = useCallback(async () => {
     const wsKey = getWorkspaceKey(workspace.path);
 
-    // 1. Archive current task to history if there are messages
-    if (messages.length > 0) {
-      const firstUser = messages.find(m => m.role === 'user');
-      const rawTitle = firstUser?.content || messages[0]?.content || 'Task';
-      const cleanTitle = rawTitle.replace(/\n+/g, ' ').trim().slice(0, 50) || 'Untitled Task';
-
-      const savedTask = {
-        id: `task_${Date.now()}`,
-        title: cleanTitle,
-        timestamp: Date.now(),
-        messages: [...messages],
-        workspaceKey: wsKey,
-      };
-
-      setTasksByWorkspace(prev => {
-        const existing = prev[wsKey] || [];
-        const next = { ...prev, [wsKey]: [savedTask, ...existing.filter(t => t.id !== savedTask.id)].slice(0, 50) };
-        persistTasks(next);
-        return next;
-      });
-
-      axios.post(`${API}/workspace/tasks`, {
-        workspace: workspace.path || '__global__',
-        task: savedTask,
-      }).catch(() => {});
-    }
-
-    // 2. Erase the current chat completely
+    // CRITICAL: Creating a new task should NEVER push or archive anything to history!
+    // A task should ONLY be recognized as part of history if the user input a chat to the agent.
+    activeTaskIdRef.current = null;
+    setActiveTaskId(null);
     setMessages([]);
     setAgentSession(null);
     setDiffViewFile(null);
@@ -1246,64 +1573,66 @@ export default function AIIDE() {
     } catch (e) {
       console.error('Failed to reset session:', e);
     }
-  }, [messages, workspace.path, getWorkspaceKey, persistChats, persistTasks]);
+  }, [workspace.path, getWorkspaceKey, persistChats]);
 
   const handleRestoreTask = useCallback((task: any) => {
     const wsKey = getWorkspaceKey(workspace.path);
 
-    // If current chat has messages and differs from target, auto-archive it first
-    if (messages.length > 0 && messages !== task.messages) {
-      const firstUser = messages.find(m => m.role === 'user');
-      const rawTitle = firstUser?.content || messages[0]?.content || 'Task';
-      const cleanTitle = rawTitle.replace(/\n+/g, ' ').trim().slice(0, 50) || 'Untitled Task';
-      const currentTask = {
-        id: `task_${Date.now()}`,
-        title: cleanTitle,
-        timestamp: Date.now(),
-        messages: [...messages],
-        workspaceKey: wsKey,
-      };
-      setTasksByWorkspace(prev => {
-        const existing = prev[wsKey] || [];
-        if (!existing.some(t => t.title === cleanTitle && t.messages.length === messages.length)) {
-          const next = { ...prev, [wsKey]: [currentTask, ...existing].slice(0, 50) };
-          persistTasks(next);
-          return next;
-        }
-        return prev;
-      });
-    }
-
-    setMessages(task.messages);
+    // Load selected task into active session without spurious auto-archiving
+    activeTaskIdRef.current = task.id;
+    setActiveTaskId(task.id);
+    setMessages(task.messages || []);
     setAgentSession(null);
     setDiffViewFile(null);
     setChatsByWorkspace(prev => {
-      const next = { ...prev, [wsKey]: task.messages };
+      const next = { ...prev, [wsKey]: task.messages || [] };
       persistChats(next);
       return next;
     });
 
     axios.post(`${API}/workspace/chat-history`, {
       workspace: workspace.path || '__global__',
-      messages: task.messages,
+      messages: task.messages || [],
     }).catch(() => {});
 
     setIsHistoryOpen(false);
-  }, [messages, workspace.path, getWorkspaceKey, persistChats, persistTasks]);
+  }, [workspace.path, getWorkspaceKey, persistChats]);
 
   const handleDeleteTask = useCallback((taskId: string) => {
     const wsKey = getWorkspaceKey(workspace.path);
     setTasksByWorkspace(prev => {
       const currentList = prev[wsKey] || [];
-      const next = { ...prev, [wsKey]: currentList.filter(t => t.id !== taskId) };
+      const nextList = currentList.filter(t => t.id !== taskId);
+      const next = { ...prev, [wsKey]: nextList };
       persistTasks(next);
       return next;
     });
+
+    // If the active task was deleted, clear current conversation view
+    if (activeTaskIdRef.current === taskId) {
+      activeTaskIdRef.current = null;
+      setActiveTaskId(null);
+      setMessages([]);
+      setAgentSession(null);
+      setDiffViewFile(null);
+      setChatsByWorkspace(prev => {
+        const next = { ...prev, [wsKey]: [] };
+        persistChats(next);
+        return next;
+      });
+      axios.post(`${API}/workspace/chat-history`, {
+        workspace: workspace.path || '__global__',
+        messages: [],
+      }).catch(() => {});
+    }
+
     axios.delete(`${API}/workspace/tasks/${encodeURIComponent(taskId)}?workspace=${encodeURIComponent(workspace.path || '__global__')}`).catch(() => {});
-  }, [workspace.path, getWorkspaceKey, persistTasks]);
+  }, [workspace.path, getWorkspaceKey, persistTasks, persistChats]);
 
   const handleClearChat = useCallback(async () => {
     const wsKey = getWorkspaceKey(workspace.path);
+    activeTaskIdRef.current = null;
+    setActiveTaskId(null);
     setMessages([]);
     setAgentSession(null);
     setDiffViewFile(null);
@@ -1575,10 +1904,14 @@ export default function AIIDE() {
           <div className="chat-scope-actions">
             {/* History Button */}
             <button
+              ref={historyButtonRef}
               type="button"
               className={`chat-history-btn ${isHistoryOpen ? 'active' : ''}`}
               title="Task History (Load previous tasks)"
-              onClick={() => setIsHistoryOpen(prev => !prev)}
+              onClick={(e) => {
+                e.stopPropagation();
+                setIsHistoryOpen(prev => !prev);
+              }}
             >
               <History size={12} />
               <span>History</span>
@@ -1616,7 +1949,11 @@ export default function AIIDE() {
 
           {/* Task History Dropdown Menu */}
           {isHistoryOpen && (
-            <div className="task-history-dropdown" ref={historyDropdownRef}>
+            <div
+              className="task-history-dropdown"
+              ref={historyDropdownRef}
+              onClick={(e) => e.stopPropagation()}
+            >
               <div className="task-history-header">
                 <div className="task-history-title">
                   <History size={13} className="text-amber" />
@@ -1641,14 +1978,14 @@ export default function AIIDE() {
                     <Clock size={24} className="task-history-empty-icon" />
                     <p className="task-history-empty-text">No previous tasks yet</p>
                     <span className="task-history-empty-sub">
-                      Tasks are automatically archived here when you click "+ New Task".
+                      Tasks are recognized here once you send a chat message to the agent.
                     </span>
                   </div>
                 ) : (
                   (tasksByWorkspace[getWorkspaceKey(workspace.path)] || []).map((task) => (
                     <div
                       key={task.id}
-                      className="task-history-item"
+                      className={`task-history-item ${activeTaskId === task.id ? 'active' : ''}`}
                       onClick={() => handleRestoreTask(task)}
                       title={`Load previous task: ${task.title}`}
                     >
@@ -1818,7 +2155,7 @@ export default function AIIDE() {
               </div>
               <button
                 className="diff-action-btn btn-accept-diff"
-                onClick={() => handleAcceptChange(diffViewFile.path)}
+                onClick={() => handleAcceptChange(diffViewFile.path, diffViewFile)}
                 title="Accept changes in this file"
               >
                 <Check size={12} />
@@ -1826,7 +2163,7 @@ export default function AIIDE() {
               </button>
               <button
                 className="diff-action-btn btn-reject-diff"
-                onClick={() => handleRejectChange(diffViewFile.path)}
+                onClick={() => handleRejectChange(diffViewFile.path, diffViewFile)}
                 title="Reject changes and revert this file"
               >
                 <RotateCcw size={12} />
@@ -2073,6 +2410,7 @@ export default function AIIDE() {
           handleFormatDocument();
         }}
         onSelectFormatter={handleSelectFormatter}
+        onInstallFormatter={handleInstallFormatter}
         allFormatters={allFormatters}
       />
 

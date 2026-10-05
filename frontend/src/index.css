@@ -424,6 +424,9 @@ body {
 
 /* === CHAT SCOPE HEADER === */
 .chat-scope-header {
+  position: relative;
+  overflow: visible;
+  z-index: 50;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -432,6 +435,13 @@ body {
   border-bottom: 1px solid #333333;
   font-size: 12px;
   user-select: none;
+}
+
+.chat-scope-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  position: relative;
 }
 
 .chat-scope-info {
@@ -570,16 +580,97 @@ body {
 /* === TASK HISTORY DROPDOWN === */
 .task-history-dropdown {
   position: absolute;
-  top: calc(100% + 4px);
+  top: calc(100% + 6px);
   right: 12px;
   width: 320px;
   background: #1e1e1e;
   border: 1px solid #3c3c3c;
   border-radius: 8px;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.65);
-  z-index: 1000;
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.75);
+  z-index: 9999;
   overflow: hidden;
   animation: fadeInTaskDropdown 0.15s ease-out;
+}
+
+/* === FILE REVIEW TAGS IN CHAT === */
+.msg-review-tags-wrapper {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+  padding: 4px 0;
+}
+
+.file-review-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  transition: all 0.15s ease;
+}
+
+.file-review-tag.tag-accepted {
+  background: rgba(35, 134, 54, 0.15);
+  border: 1px solid rgba(35, 134, 54, 0.4);
+  color: #4cd964;
+}
+
+.file-review-tag.tag-rejected {
+  background: rgba(218, 54, 51, 0.15);
+  border: 1px solid rgba(218, 54, 51, 0.4);
+  color: #f85149;
+}
+
+.file-review-tag .tag-file-icon {
+  flex-shrink: 0;
+  opacity: 0.85;
+}
+
+.file-review-tag .tag-file-name {
+  font-weight: 500;
+  color: #cccccc;
+}
+
+.file-review-tag .tag-status-badge {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+
+.file-review-tag .tag-status-badge.badge-accepted {
+  background: #238636;
+  color: #ffffff;
+}
+
+.file-review-tag .tag-status-badge.badge-rejected {
+  background: #da3633;
+  color: #ffffff;
+}
+
+.diff-pill.tag-accepted {
+  background: rgba(35, 134, 54, 0.25);
+  color: #4cd964;
+  border: 1px solid rgba(35, 134, 54, 0.5);
+  font-weight: 600;
+  text-transform: uppercase;
+  font-size: 9px;
+  letter-spacing: 0.5px;
+}
+
+.diff-pill.tag-rejected {
+  background: rgba(218, 54, 51, 0.25);
+  color: #f85149;
+  border: 1px solid rgba(218, 54, 51, 0.5);
+  font-weight: 600;
+  text-transform: uppercase;
+  font-size: 9px;
+  letter-spacing: 0.5px;
 }
 
 @keyframes fadeInTaskDropdown {
@@ -683,6 +774,11 @@ body {
 
 .task-history-item:hover {
   background: rgba(255, 255, 255, 0.05);
+}
+
+.task-history-item.active {
+  background: rgba(97, 175, 239, 0.12);
+  border-left: 2px solid #61afef;
 }
 
 .task-history-item-content {
@@ -2140,8 +2236,20 @@ body {
   transition: all 0.15s ease;
 }
 
-.copy-btn:hover {
-  background: #373a3c;
+.formatter-integrated-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(99, 102, 241, 0.08);
+  border: 1px solid rgba(99, 102, 241, 0.25);
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  font-size: 12px;
+  color: #d1d5db;
+}
+
+.formatter-integrated-banner strong {
   color: #ffffff;
 }
 

@@ -294,60 +294,78 @@ export class ActivityTracker extends EventEmitter {
     return change;
   }
 
-  async acceptChange(relPath: string): Promise<boolean> {
-    const item = this.session.changedFiles.find(f => f.path === relPath);
-    if (!item) return false;
-
-    item.status = 'accepted';
-    this.session.pendingChanges = this.session.pendingChanges.filter(f => f.path !== relPath);
+  async acceptChange(relPath: string, fallbackModifiedContent?: string): Promise<boolean> {
+    const item = this.session.changedFiles.find(
+      f => f.path === relPath || f.path.endsWith(relPath) || relPath.endsWith(f.path)
+    );
+    const contentToWrite = item?.modifiedContent ?? fallbackModifiedContent;
 
     // Ensure modified content is saved to disk
-    try {
-      const fullPath = WorkspaceContext.resolvePath(relPath);
-      await fs.writeFile(fullPath, item.modifiedContent, 'utf-8');
-    } catch (err) {
-      console.error(`[ActivityTracker] Error writing accepted file ${relPath}:`, err);
+    if (contentToWrite !== undefined) {
+      try {
+        const fullPath = WorkspaceContext.resolvePath(relPath);
+        await fs.writeFile(fullPath, contentToWrite, 'utf-8');
+      } catch (err) {
+        console.error(`[ActivityTracker] Error writing accepted file ${relPath}:`, err);
+      }
     }
+
+    // Remove file from changed and pending list
+    this.session.changedFiles = this.session.changedFiles.filter(
+      f => f.path !== relPath && !f.path.endsWith(relPath) && !relPath.endsWith(f.path)
+    );
+    this.session.pendingChanges = this.session.pendingChanges.filter(
+      f => f.path !== relPath && !f.path.endsWith(relPath) && !relPath.endsWith(f.path)
+    );
 
     this.emit('file_changes', this.session.changedFiles);
     this.emit('session_update', this.session);
     return true;
   }
 
-  async rejectChange(relPath: string): Promise<boolean> {
-    const item = this.session.changedFiles.find(f => f.path === relPath);
-    if (!item) return false;
-
-    item.status = 'rejected';
-    this.session.pendingChanges = this.session.pendingChanges.filter(f => f.path !== relPath);
+  async rejectChange(relPath: string, fallbackOriginalContent?: string): Promise<boolean> {
+    const item = this.session.changedFiles.find(
+      f => f.path === relPath || f.path.endsWith(relPath) || relPath.endsWith(f.path)
+    );
+    const origContent = item?.originalContent ?? fallbackOriginalContent;
 
     // Revert to original content on disk
     try {
       const fullPath = WorkspaceContext.resolvePath(relPath);
-      if (item.originalContent) {
-        await fs.writeFile(fullPath, item.originalContent, 'utf-8');
-      } else {
-        // If file was newly created, remove it
+      if (origContent !== undefined && origContent !== null && origContent !== '') {
+        await fs.writeFile(fullPath, origContent, 'utf-8');
+      } else if (item && !item.originalContent) {
+        // If file was newly created and has no original content, remove it
         await fs.unlink(fullPath).catch(() => {});
       }
     } catch (err) {
       console.error(`[ActivityTracker] Error reverting rejected file ${relPath}:`, err);
     }
 
+    // Remove file from changed and pending list
+    this.session.changedFiles = this.session.changedFiles.filter(
+      f => f.path !== relPath && !f.path.endsWith(relPath) && !relPath.endsWith(f.path)
+    );
+    this.session.pendingChanges = this.session.pendingChanges.filter(
+      f => f.path !== relPath && !f.path.endsWith(relPath) && !relPath.endsWith(f.path)
+    );
+
     this.emit('file_changes', this.session.changedFiles);
     this.emit('session_update', this.session);
     return true;
   }
 
-  async acceptAllChanges(): Promise<void> {
-    for (const item of [...this.session.changedFiles]) {
-      await this.acceptChange(item.path);
+  async acceptAllChanges(filesList?: ChangedFile[]): Promise<void> {
+    const targets = filesList && filesList.length > 0 ? filesList : [...this.session.changedFiles];
+    for (const item of targets) {
+      await this.acceptChange(item.path, item.modifiedContent);
     }
   }
 
-  async rejectAllChanges(): Promise<void> {
-    for (const item of [...this.session.changedFiles]) {
-      await this.rejectChange(item.path);
+  async rejectAllChanges(filesList?: ChangedFile[]): Promise<void> {
+    const targets = filesList && filesList.length > 0 ? filesList : [...this.session.changedFiles];
+    for (const item of targets) {
+      await this.rejectChange(item.path, item.originalContent);
     }
   }
 }

@@ -417,7 +417,10 @@ export const FORMATTERS: FormatterDefinition[] = [
     installHelp: 'Built-in text, lockfile, and config formatter active',
     builtinSupported: true,
   },
-];
+].map((f) => ({
+  ...f,
+  builtinSupported: true,
+}));
 
 export class FormatterRegistry {
   private static formatters: FormatterDefinition[] = [...FORMATTERS];

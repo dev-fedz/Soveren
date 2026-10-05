@@ -31,6 +31,7 @@ import {
 interface AgentActivityTimelineProps {
   session?: AgentSession | null;
   activities?: AgentActivity[];
+  fileReviewTags?: Record<string, 'accepted' | 'rejected'>;
   onNewSession?: () => void;
   onSelectDiff?: (file: ChangedFile) => void;
   onRefresh?: () => void;
@@ -41,6 +42,7 @@ interface AgentActivityTimelineProps {
 export const AgentActivityTimeline: React.FC<AgentActivityTimelineProps> = ({
   session,
   activities,
+  fileReviewTags,
   onNewSession,
   onSelectDiff,
   onRefresh,
@@ -187,44 +189,55 @@ export const AgentActivityTimeline: React.FC<AgentActivityTimelineProps> = ({
                     <span className="activity-title">{activity.title}</span>
 
                     {/* Diff line stats for editing */}
-                    {activity.type === 'editing' && activity.file && (
-                      <div className="diff-stat-pills">
-                        {(activity.file.additions ?? 0) > 0 && (
-                          <span className="diff-pill additions">+{activity.file.additions}</span>
-                        )}
-                        {(activity.file.deletions ?? 0) > 0 && (
-                          <span className="diff-pill deletions">-{activity.file.deletions}</span>
-                        )}
-                        {onSelectDiff && (
-                          <button
-                            className="view-diff-link-btn"
-                            title="Open unified diff viewer"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              const matched = session?.changedFiles?.find(
-                                (cf) => cf.path === activity.file?.path
-                              );
-                              if (matched) {
-                                onSelectDiff(matched);
-                              } else if (activity.file) {
-                                onSelectDiff({
-                                  path: activity.file.path,
-                                  additions: activity.file.additions || 0,
-                                  deletions: activity.file.deletions || 0,
-                                  originalContent: activity.file.oldContent || '',
-                                  modifiedContent: activity.file.newContent || '',
-                                  diff: activity.file.diff,
-                                  status: 'pending',
-                                });
-                              }
-                            }}
-                          >
-                            <ExternalLink size={11} />
-                            <span>Diff</span>
-                          </button>
-                        )}
-                      </div>
-                    )}
+                    {activity.type === 'editing' && activity.file && (() => {
+                      const fPath = activity.file.path || '';
+                      const reviewStatus = fileReviewTags?.[fPath] ||
+                        (fileReviewTags && Object.entries(fileReviewTags).find(([k]) => fPath.endsWith(k) || k.endsWith(fPath))?.[1]);
+
+                      return (
+                        <div className="diff-stat-pills">
+                          {(activity.file.additions ?? 0) > 0 && (
+                            <span className="diff-pill additions">+{activity.file.additions}</span>
+                          )}
+                          {(activity.file.deletions ?? 0) > 0 && (
+                            <span className="diff-pill deletions">-{activity.file.deletions}</span>
+                          )}
+                          {reviewStatus && (
+                            <span className={`diff-pill tag-${reviewStatus}`}>
+                              {reviewStatus === 'accepted' ? 'accepted' : 'rejected'}
+                            </span>
+                          )}
+                          {onSelectDiff && reviewStatus !== 'rejected' && (
+                            <button
+                              className="view-diff-link-btn"
+                              title="Open unified diff viewer"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                const matched = session?.changedFiles?.find(
+                                  (cf) => cf.path === activity.file?.path
+                                );
+                                if (matched) {
+                                  onSelectDiff(matched);
+                                } else if (activity.file) {
+                                  onSelectDiff({
+                                    path: activity.file.path,
+                                    additions: activity.file.additions || 0,
+                                    deletions: activity.file.deletions || 0,
+                                    originalContent: activity.file.oldContent || '',
+                                    modifiedContent: activity.file.newContent || '',
+                                    diff: activity.file.diff,
+                                    status: 'pending',
+                                  });
+                                }
+                              }}
+                            >
+                              <ExternalLink size={11} />
+                              <span>Diff</span>
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })()}
 
                     {/* Test summary pills */}
                     {activity.type === 'test' && activity.test && (

@@ -14,10 +14,10 @@ import {
 interface ChangedFilesPanelProps {
   changedFiles: ChangedFile[];
   onSelectFile: (file: ChangedFile) => void;
-  onAcceptChange: (path: string) => void;
-  onRejectChange: (path: string) => void;
-  onAcceptAll: () => void;
-  onRejectAll: () => void;
+  onAcceptChange: (path: string, file?: ChangedFile) => void;
+  onRejectChange: (path: string, file?: ChangedFile) => void;
+  onAcceptAll: (files?: ChangedFile[]) => void;
+  onRejectAll: (files?: ChangedFile[]) => void;
   selectedFilePath?: string | null;
 }
 
@@ -71,7 +71,7 @@ export const ChangedFilesPanel: React.FC<ChangedFilesPanelProps> = ({
         <div className="changed-files-bulk-actions" onClick={(e) => e.stopPropagation()}>
           <button
             className="bulk-action-btn btn-reject-all"
-            onClick={onRejectAll}
+            onClick={() => onRejectAll(changedFiles)}
             title="Reject all pending changes and revert files"
           >
             <RotateCcw size={12} />
@@ -79,7 +79,7 @@ export const ChangedFilesPanel: React.FC<ChangedFilesPanelProps> = ({
           </button>
           <button
             className="bulk-action-btn btn-accept-all"
-            onClick={onAcceptAll}
+            onClick={() => onAcceptAll(changedFiles)}
             title="Accept all changes"
           >
             <CheckCheck size={12} />
@@ -137,7 +137,7 @@ export const ChangedFilesPanel: React.FC<ChangedFilesPanelProps> = ({
                     className={`file-action-btn btn-accept ${
                       file.status === 'accepted' ? 'active' : ''
                     }`}
-                    onClick={() => onAcceptChange(file.path)}
+                    onClick={() => onAcceptChange(file.path, file)}
                     title={`Accept change for ${basename}`}
                   >
                     <Check size={12} />
@@ -146,7 +146,7 @@ export const ChangedFilesPanel: React.FC<ChangedFilesPanelProps> = ({
                     className={`file-action-btn btn-reject ${
                       file.status === 'rejected' ? 'active' : ''
                     }`}
-                    onClick={() => onRejectChange(file.path)}
+                    onClick={() => onRejectChange(file.path, file)}
                     title={`Reject change and revert ${basename}`}
                   >
                     <X size={12} />

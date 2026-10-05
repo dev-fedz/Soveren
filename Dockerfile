@@ -4,9 +4,14 @@ FROM node:20-slim
 # Set working directory
 WORKDIR /app
 
-# Install system dependencies needed for native modules, git tools, process inspection, and Docker CLI
+# Install system dependencies needed for native modules, git tools, process inspection, code formatters, and Docker CLI
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
+    python3-pip \
+    python3-venv \
+    black \
+    clang-format \
+    shfmt \
     make \
     g++ \
     git \
@@ -27,6 +32,9 @@ RUN install -m 0755 -d /etc/apt/keyrings \
     && apt-get update \
     && apt-get install -y --no-install-recommends docker-ce-cli docker-compose-plugin \
     && rm -rf /var/lib/apt/lists/*
+
+# Install global code formatters (Prettier, SQLFluff)
+RUN npm install -g prettier && pip install --break-system-packages sqlfluff
 
 # Copy package files first to leverage Docker layer caching
 COPY package*.json ./

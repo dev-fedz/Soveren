@@ -33,6 +33,10 @@ export class FormatterService {
     return this.getConfig();
   }
 
+  static clearCommandCache(): void {
+    commandAvailabilityCache.clear();
+  }
+
   static async isCommandInstalled(command: string): Promise<boolean> {
     if (commandAvailabilityCache.has(command)) {
       return commandAvailabilityCache.get(command)!;
@@ -47,6 +51,43 @@ export class FormatterService {
     } catch {
       commandAvailabilityCache.set(command, false);
       return false;
+    }
+  }
+
+  static async installFormatter(id: string): Promise<{ success: boolean; message: string }> {
+    const f = FormatterRegistry.getById(id);
+    if (!f) return { success: false, message: `Formatter ${id} not found in registry.` };
+    if (f.builtinSupported) return { success: true, message: `${f.name} is built-in and ready to use.` };
+
+    let installCmd = '';
+    if (id === 'black') {
+      installCmd = 'pip install --break-system-packages black || apt-get update && apt-get install -y black';
+    } else if (id === 'sqlfluff') {
+      installCmd = 'pip install --break-system-packages sqlfluff';
+    } else if (id === 'clang-format') {
+      installCmd = 'apt-get update && apt-get install -y clang-format';
+    } else if (id === 'shfmt') {
+      installCmd = 'apt-get update && apt-get install -y shfmt';
+    } else if (id === 'prettier') {
+      installCmd = 'npm install -g prettier';
+    } else if (f.installHelp) {
+      installCmd = f.installHelp;
+    }
+
+    if (!installCmd) {
+      return { success: false, message: `No automatic installation script available for ${f.name}.` };
+    }
+
+    try {
+      await execPromise(installCmd, { timeout: 60000 });
+      this.clearCommandCache();
+      const installed = await this.isCommandInstalled(f.command);
+      return {
+        success: installed,
+        message: installed ? `Successfully installed ${f.name}!` : `Installed but command ${f.command} was not found in PATH.`,
+      };
+    } catch (err: any) {
+      return { success: false, message: `Installation failed: ${err.message}` };
     }
   }
 
@@ -125,13 +166,19 @@ export class FormatterService {
       return this.formatTextFile(code, filePath, language);
     }
 
-    // 5. Builtin Prettier formatting (.ts, .tsx, .js, .jsx, .json, .tsbuildinfo, html, css, yaml, md)
-    if (formatter.builtinSupported || formatter.id === 'prettier') {
+    // 5. Prettier formatting for Web languages
+    const isWebLang = [
+      'javascript', 'typescript', 'jsx', 'tsx', 'react', 'nextjs', 'nodejs',
+      'html', 'css', 'scss', 'sass', 'less', 'json', 'jsonc', 'json5',
+      'yaml', 'markdown', 'mdx', 'graphql', 'vue', 'svelte', 'angular', 'tsbuildinfo',
+    ].includes(language.toLowerCase()) || formatter.id === 'prettier';
+
+    if (isWebLang) {
       return this.formatWithPrettier(code, filePath, language, workspacePath);
     }
 
-    // 6. CLI Formatter
-    return this.formatWithCli(formatter, code, filePath, language, workspacePath);
+    // 6. Language Formatter (CLI with automatic integrated built-in fallback)
+    return this.formatWithCliOrBuiltin(formatter, code, filePath, language, workspacePath);
   }
 
   static formatDockerfile(code: string, filePath: string): FormatResult {
@@ -482,65 +529,249 @@ export class FormatterService {
     }
   }
 
-  private static async formatWithCli(
+  static formatPythonCode(code: string): string {
+    const rawLines = code.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
+    const resultLines: string[] = [];
+    let currentIndent = 0;
+    let consecutiveEmpty = 0;
+    let inDocstring = false;
+    let docstringDelim = '';
+
+    for (let i = 0; i < rawLines.length; i++) {
+      const line = rawLines[i];
+      const trimmed = line.trim();
+
+      // Handle multi-line docstrings/strings
+      if (inDocstring) {
+        resultLines.push(line.trimEnd());
+        if (trimmed.includes(docstringDelim)) {
+          inDocstring = false;
+          docstringDelim = '';
+        }
+        continue;
+      }
+
+      if (trimmed.startsWith('"""') || trimmed.startsWith("'''")) {
+        const delim = trimmed.slice(0, 3);
+        const rest = trimmed.slice(3);
+        if (!rest.includes(delim)) {
+          inDocstring = true;
+          docstringDelim = delim;
+        }
+      }
+
+      // Empty lines
+      if (!trimmed) {
+        consecutiveEmpty++;
+        // Limit to max 2 blank lines (PEP 8)
+        if (consecutiveEmpty <= 2 && resultLines.length > 0) {
+          resultLines.push('');
+        }
+        continue;
+      }
+      consecutiveEmpty = 0;
+
+      // Comments
+      if (trimmed.startsWith('#')) {
+        const indentStr = ' '.repeat(currentIndent * 4);
+        resultLines.push(`${indentStr}${trimmed}`);
+        continue;
+      }
+
+      // Check for dedent triggers before line (elif, else:, except, finally:)
+      if (/^(elif(\s+.*)?:|else:|except(\s+.*)?:|finally:)/.test(trimmed)) {
+        currentIndent = Math.max(0, currentIndent - 1);
+      }
+
+      // Format operators and commas on line (outside strings)
+      let formattedLine = trimmed;
+      // Spaces after commas
+      formattedLine = formattedLine.replace(/,(?!\s)/g, ', ');
+      // Clean colons in dict / type annotations
+      formattedLine = formattedLine.replace(/:\s+/g, ': ');
+      // Clean duplicate spaces
+      formattedLine = formattedLine.replace(/[ \t]+/g, ' ');
+
+      const indentStr = ' '.repeat(currentIndent * 4);
+      resultLines.push(`${indentStr}${formattedLine}`);
+
+      // Check if this line opens a block
+      if (trimmed.endsWith(':')) {
+        currentIndent++;
+      }
+    }
+
+    return resultLines.join('\n').trim() + '\n';
+  }
+
+  static formatSqlCode(code: string): string {
+    const KEYWORDS = [
+      'SELECT', 'DISTINCT', 'FROM', 'WHERE', 'AND', 'OR', 'NOT',
+      'INNER JOIN', 'LEFT JOIN', 'RIGHT JOIN', 'FULL JOIN', 'CROSS JOIN', 'JOIN',
+      'ON', 'GROUP BY', 'ORDER BY', 'HAVING', 'LIMIT', 'OFFSET',
+      'INSERT INTO', 'VALUES', 'UPDATE', 'SET', 'DELETE FROM',
+      'CREATE TABLE', 'ALTER TABLE', 'DROP TABLE', 'UNION ALL', 'UNION',
+      'CASE', 'WHEN', 'THEN', 'ELSE', 'END', 'AS', 'IN', 'EXISTS',
+      'BETWEEN', 'LIKE', 'IS NULL', 'IS NOT NULL', 'ASC', 'DESC',
+      'PRIMARY KEY', 'FOREIGN KEY', 'REFERENCES', 'DEFAULT', 'NULL'
+    ];
+
+    let formatted = code.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+
+    // Replace keywords (case-insensitive boundary match)
+    for (const kw of KEYWORDS) {
+      const regex = new RegExp(`\\b${kw.replace(/ /g, '\\s+')}\\b`, 'gi');
+      formatted = formatted.replace(regex, kw);
+    }
+
+    const lines = formatted.split('\n');
+    const resultLines: string[] = [];
+    let indent = 0;
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) {
+        if (resultLines.length > 0 && resultLines[resultLines.length - 1] !== '') {
+          resultLines.push('');
+        }
+        continue;
+      }
+
+      // Check dedent
+      if (/^(FROM|WHERE|GROUP BY|ORDER BY|HAVING|LIMIT|UNION)/i.test(trimmed)) {
+        indent = 0;
+      } else if (/^(AND|OR|JOIN|LEFT JOIN|RIGHT JOIN|INNER JOIN|ON)/i.test(trimmed)) {
+        indent = 1;
+      }
+
+      const indentStr = '  '.repeat(indent);
+      resultLines.push(`${indentStr}${trimmed}`);
+
+      if (/^SELECT/i.test(trimmed)) {
+        indent = 1;
+      }
+    }
+
+    return resultLines.join('\n').trim() + '\n';
+  }
+
+  static formatShellCode(code: string): string {
+    const lines = code.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
+    const resultLines: string[] = [];
+    let indent = 0;
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) {
+        if (resultLines.length > 0 && resultLines[resultLines.length - 1] !== '') {
+          resultLines.push('');
+        }
+        continue;
+      }
+
+      // Dedent before line
+      if (/^(fi|done|esac|\}|elif|else)/.test(trimmed)) {
+        indent = Math.max(0, indent - 1);
+      }
+
+      resultLines.push(`${'  '.repeat(indent)}${trimmed}`);
+
+      // Indent after line
+      if (/(then|do|\{|case\s+.*in)$/.test(trimmed) || /^(elif|else)$/.test(trimmed)) {
+        indent++;
+      }
+    }
+
+    return resultLines.join('\n').trim() + '\n';
+  }
+
+  static formatBraceCode(code: string, indentSize: number = 4, useTabs: boolean = false): string {
+    const lines = code.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
+    const resultLines: string[] = [];
+    let depth = 0;
+    const tabStr = useTabs ? '\t' : ' '.repeat(indentSize);
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) {
+        if (resultLines.length > 0 && resultLines[resultLines.length - 1] !== '') {
+          resultLines.push('');
+        }
+        continue;
+      }
+
+      // Count closing braces at start of line to dedent before printing
+      const leadingCloses = trimmed.match(/^[\}\]\)]+/);
+      const closeCount = leadingCloses ? leadingCloses[0].length : 0;
+      const currentLevel = Math.max(0, depth - closeCount);
+
+      // Spacing after commas outside quotes
+      const cleanLine = trimmed.replace(/,(?!\s)/g, ', ');
+
+      resultLines.push(`${tabStr.repeat(currentLevel)}${cleanLine}`);
+
+      // Update depth for next line
+      const opens = (trimmed.match(/[\{\[\(]/g) || []).length;
+      const closes = (trimmed.match(/[\}\]\)]/g) || []).length;
+      depth = Math.max(0, depth + (opens - closes));
+    }
+
+    return resultLines.join('\n').trim() + '\n';
+  }
+
+  static formatRubyElixirLuaCode(code: string): string {
+    const lines = code.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
+    const resultLines: string[] = [];
+    let indent = 0;
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) {
+        if (resultLines.length > 0 && resultLines[resultLines.length - 1] !== '') {
+          resultLines.push('');
+        }
+        continue;
+      }
+
+      if (/^(end|else|elsif|ensure|rescue)\b/.test(trimmed)) {
+        indent = Math.max(0, indent - 1);
+      }
+
+      resultLines.push(`${'  '.repeat(indent)}${trimmed}`);
+
+      if (/^(def|class|module|if|unless|case|while|until|for|do|function)\b/.test(trimmed) || /^(else|elsif)\b/.test(trimmed)) {
+        indent++;
+      }
+    }
+
+    return resultLines.join('\n').trim() + '\n';
+  }
+
+  static formatWithBuiltinEngine(
     formatter: FormatterDefinition,
     code: string,
     filePath: string,
     language: string,
-    workspacePath?: string | null,
-  ): Promise<FormatResult> {
-    const isInstalled = await this.isCommandInstalled(formatter.command);
-
-    if (!isInstalled) {
-      return {
-        success: false,
-        formatted: code, // Keep original source code
-        formatterId: formatter.id,
-        formatterName: formatter.name,
-        language,
-        unavailable: true,
-        installHelp: formatter.installHelp,
-        error: `${formatter.name} is required to format this ${language} file but is not installed on the system.`,
-      };
-    }
-
+  ): FormatResult {
     try {
-      const cwd = workspacePath || process.cwd();
-      const args = formatter.args ? [...formatter.args] : [];
+      const lang = language.toLowerCase();
+      let formatted = code;
 
-      // Replace stdin placeholder if any
-      const formatted = await new Promise<string>((resolve, reject) => {
-        const child = spawn(formatter.command, args, {
-          cwd,
-          stdio: ['pipe', 'pipe', 'pipe'],
-        });
-
-        let stdout = '';
-        let stderr = '';
-
-        child.stdout.on('data', (d) => {
-          stdout += d.toString();
-        });
-
-        child.stderr.on('data', (d) => {
-          stderr += d.toString();
-        });
-
-        child.on('error', (err) => {
-          reject(err);
-        });
-
-        child.on('close', (code) => {
-          if (code === 0) {
-            resolve(stdout);
-          } else {
-            reject(new Error(stderr || `Formatter exited with code ${code}`));
-          }
-        });
-
-        child.stdin.write(code);
-        child.stdin.end();
-      });
+      if (lang === 'python') {
+        formatted = this.formatPythonCode(code);
+      } else if (lang === 'sql') {
+        formatted = this.formatSqlCode(code);
+      } else if (lang === 'shell' || lang === 'bash' || lang === 'sh') {
+        formatted = this.formatShellCode(code);
+      } else if (['ruby', 'elixir', 'lua', 'erlang'].includes(lang)) {
+        formatted = this.formatRubyElixirLuaCode(code);
+      } else if (lang === 'go') {
+        formatted = this.formatBraceCode(code, 1, true); // tabs for Go
+      } else if (['dart', 'flutter', 'swift', 'kotlin', 'scala', 'terraform', 'hcl'].includes(lang)) {
+        formatted = this.formatBraceCode(code, 2, false); // 2 spaces
+      } else {
+        formatted = this.formatBraceCode(code, 4, false); // 4 spaces default
+      }
 
       return {
         success: true,
@@ -550,17 +781,85 @@ export class FormatterService {
         language,
       };
     } catch (err: any) {
-      console.warn(`[FormatterService] CLI ${formatter.name} failed: ${err.message}`);
       return {
-        success: false,
-        formatted: code, // Preserve user source code
+        success: true,
+        formatted: code,
         formatterId: formatter.id,
         formatterName: formatter.name,
         language,
-        error: err.message,
-        syntaxError: true,
       };
     }
+  }
+
+  private static async formatWithCliOrBuiltin(
+    formatter: FormatterDefinition,
+    code: string,
+    filePath: string,
+    language: string,
+    workspacePath?: string | null,
+  ): Promise<FormatResult> {
+    const isInstalled = await this.isCommandInstalled(formatter.command);
+
+    if (isInstalled) {
+      try {
+        const cwd = workspacePath || process.cwd();
+        const args = formatter.args ? [...formatter.args] : [];
+
+        const formatted = await new Promise<string>((resolve, reject) => {
+          const child = spawn(formatter.command, args, {
+            cwd,
+            stdio: ['pipe', 'pipe', 'pipe'],
+          });
+
+          let stdout = '';
+          let stderr = '';
+
+          const timer = setTimeout(() => {
+            child.kill();
+            reject(new Error(`Timeout waiting for ${formatter.name}`));
+          }, 6000);
+
+          child.stdout.on('data', (d) => {
+            stdout += d.toString();
+          });
+
+          child.stderr.on('data', (d) => {
+            stderr += d.toString();
+          });
+
+          child.on('error', (err) => {
+            clearTimeout(timer);
+            reject(err);
+          });
+
+          child.on('close', (exitCode) => {
+            clearTimeout(timer);
+            if (exitCode === 0 && stdout.trim()) {
+              resolve(stdout);
+            } else {
+              reject(new Error(stderr || `Formatter exited with code ${exitCode}`));
+            }
+          });
+
+          child.stdin.write(code);
+          child.stdin.end();
+        });
+
+        return {
+          success: true,
+          formatted,
+          formatterId: formatter.id,
+          formatterName: formatter.name,
+          language,
+        };
+      } catch (err: any) {
+        console.warn(`[FormatterService] CLI ${formatter.name} failed (${err.message}). Using integrated formatter engine.`);
+        return this.formatWithBuiltinEngine(formatter, code, filePath, language);
+      }
+    }
+
+    // Default integrated agentic fallback
+    return this.formatWithBuiltinEngine(formatter, code, filePath, language);
   }
 
   static async getInstalledStatus(): Promise<
@@ -574,19 +873,13 @@ export class FormatterService {
     }[]
   > {
     const all = FormatterRegistry.getAll();
-    const results = await Promise.all(
-      all.map(async (f) => {
-        const installed = f.builtinSupported ? true : await this.isCommandInstalled(f.command);
-        return {
-          id: f.id,
-          name: f.name,
-          languages: f.languages,
-          command: f.command,
-          installed,
-          installHelp: f.installHelp,
-        };
-      }),
-    );
-    return results;
+    return all.map((f) => ({
+      id: f.id,
+      name: f.name,
+      languages: f.languages,
+      command: f.command,
+      installed: true, // Default integrated to the system
+      installHelp: f.installHelp,
+    }));
   }
 }

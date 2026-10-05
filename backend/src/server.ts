@@ -347,6 +347,31 @@ const tasksFile = path.join(
   'tasks.json'
 );
 
+function sanitizeBackendTasks(list: any[]): SavedTask[] {
+  if (!Array.isArray(list)) return [];
+  const sorted = [...list].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+  const seenIds = new Set<string>();
+  const seenKeys = new Set<string>();
+  const result: SavedTask[] = [];
+
+  for (const item of sorted) {
+    if (!item || !item.id) continue;
+    const msgs = Array.isArray(item.messages) ? item.messages : [];
+    // Only recognize as part of history if the user input a chat to the agent
+    const firstUserMsg = msgs.find((m: any) => m.role === 'user' && m.content && String(m.content).trim());
+    if (!firstUserMsg) continue;
+
+    const dedupKey = `${String(item.title || '').trim().toLowerCase()}::${String(firstUserMsg.content || '').trim().toLowerCase()}`;
+
+    if (!seenIds.has(item.id) && !seenKeys.has(dedupKey)) {
+      seenIds.add(item.id);
+      seenKeys.add(dedupKey);
+      result.push(item);
+    }
+  }
+  return result;
+}
+
 async function loadPersistedTasks() {
   try {
     const raw = await fs.readFile(tasksFile, 'utf-8');
@@ -354,7 +379,7 @@ async function loadPersistedTasks() {
     if (data && typeof data === 'object') {
       for (const [key, list] of Object.entries(data)) {
         if (Array.isArray(list)) {
-          tasksCache.set(key, list as SavedTask[]);
+          tasksCache.set(key, sanitizeBackendTasks(list));
         }
       }
     }
@@ -368,7 +393,7 @@ async function savePersistedTasks() {
     await fs.mkdir(dir, { recursive: true });
     const obj: Record<string, SavedTask[]> = {};
     for (const [k, v] of tasksCache.entries()) {
-      obj[k] = v;
+      obj[k] = sanitizeBackendTasks(v);
     }
     await fs.writeFile(tasksFile, JSON.stringify(obj, null, 2), 'utf-8');
   } catch (e) {
@@ -379,7 +404,7 @@ async function savePersistedTasks() {
 app.get('/workspace/tasks', (req, res) => {
   const workspaceParam = req.query.workspace as string | undefined;
   const key = (!workspaceParam || workspaceParam === '__global__' || workspaceParam === 'global') ? '__global__' : workspaceParam;
-  const tasks = tasksCache.get(key) || [];
+  const tasks = sanitizeBackendTasks(tasksCache.get(key) || []);
   res.json({ workspace: key, tasks });
 });
 
@@ -388,9 +413,14 @@ app.post('/workspace/tasks', async (req, res) => {
     const { workspace, task } = req.body;
     const key = (!workspace || workspace === '__global__' || workspace === 'global') ? '__global__' : workspace;
     if (task && task.id) {
+      const msgs = Array.isArray(task.messages) ? task.messages : [];
+      const hasUser = msgs.some((m: any) => m.role === 'user' && m.content && String(m.content).trim());
+      if (!hasUser) {
+        return res.json({ status: 'ignored', reason: 'Task only recognized if user input a chat to the agent' });
+      }
       const list = tasksCache.get(key) || [];
       const filtered = list.filter(t => t.id !== task.id);
-      const updated = [task, ...filtered].slice(0, 50);
+      const updated = sanitizeBackendTasks([task, ...filtered]).slice(0, 50);
       tasksCache.set(key, updated);
       await savePersistedTasks();
     }
@@ -824,6 +854,17 @@ app.get('/formatters', async (req, res) => {
   try {
     const list = await FormatterService.getInstalledStatus();
     res.json({ formatters: list });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/formatters/install/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await FormatterService.installFormatter(id);
+    const list = await FormatterService.getInstalledStatus();
+    res.json({ ...result, formatters: list });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
@@ -1310,9 +1351,12 @@ app.post('/ai/agent/stop', (req, res) => {
 
 app.post('/ai/agent/accept-change', async (req, res) => {
   try {
-    const { path: filePath } = req.body;
-    const ok = await globalActivityTracker.acceptChange(filePath);
-    res.json({ status: ok ? 'ok' : 'not_found' });
+    const { path: filePath, modifiedContent, workspace: wsPath } = req.body;
+    if (wsPath && (!WorkspaceContext.getRoot() || WorkspaceContext.getRoot() !== wsPath)) {
+      try { await workspaceManager.select(wsPath); agent.setWorkspace(wsPath); } catch {}
+    }
+    const ok = await globalActivityTracker.acceptChange(filePath, modifiedContent);
+    res.json({ status: ok ? 'ok' : 'not_found', session: globalActivityTracker.getSession() });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
@@ -1320,9 +1364,12 @@ app.post('/ai/agent/accept-change', async (req, res) => {
 
 app.post('/ai/agent/reject-change', async (req, res) => {
   try {
-    const { path: filePath } = req.body;
-    const ok = await globalActivityTracker.rejectChange(filePath);
-    res.json({ status: ok ? 'ok' : 'not_found' });
+    const { path: filePath, originalContent, workspace: wsPath } = req.body;
+    if (wsPath && (!WorkspaceContext.getRoot() || WorkspaceContext.getRoot() !== wsPath)) {
+      try { await workspaceManager.select(wsPath); agent.setWorkspace(wsPath); } catch {}
+    }
+    const ok = await globalActivityTracker.rejectChange(filePath, originalContent);
+    res.json({ status: ok ? 'ok' : 'not_found', session: globalActivityTracker.getSession() });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
@@ -1330,8 +1377,12 @@ app.post('/ai/agent/reject-change', async (req, res) => {
 
 app.post('/ai/agent/accept-all', async (req, res) => {
   try {
-    await globalActivityTracker.acceptAllChanges();
-    res.json({ status: 'ok' });
+    const { files, workspace: wsPath } = req.body || {};
+    if (wsPath && (!WorkspaceContext.getRoot() || WorkspaceContext.getRoot() !== wsPath)) {
+      try { await workspaceManager.select(wsPath); agent.setWorkspace(wsPath); } catch {}
+    }
+    await globalActivityTracker.acceptAllChanges(files);
+    res.json({ status: 'ok', session: globalActivityTracker.getSession() });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
@@ -1339,8 +1390,12 @@ app.post('/ai/agent/accept-all', async (req, res) => {
 
 app.post('/ai/agent/reject-all', async (req, res) => {
   try {
-    await globalActivityTracker.rejectAllChanges();
-    res.json({ status: 'ok' });
+    const { files, workspace: wsPath } = req.body || {};
+    if (wsPath && (!WorkspaceContext.getRoot() || WorkspaceContext.getRoot() !== wsPath)) {
+      try { await workspaceManager.select(wsPath); agent.setWorkspace(wsPath); } catch {}
+    }
+    await globalActivityTracker.rejectAllChanges(files);
+    res.json({ status: 'ok', session: globalActivityTracker.getSession() });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
@@ -1503,22 +1558,34 @@ io.on('connection', (socket) => {
 
   socket.on('accept_change', async (data) => {
     if (data?.path) {
-      await globalActivityTracker.acceptChange(data.path);
+      if (data?.workspace && (!WorkspaceContext.getRoot() || WorkspaceContext.getRoot() !== data.workspace)) {
+        try { await workspaceManager.select(data.workspace); agent.setWorkspace(data.workspace); } catch {}
+      }
+      await globalActivityTracker.acceptChange(data.path, data.modifiedContent);
     }
   });
 
   socket.on('reject_change', async (data) => {
     if (data?.path) {
-      await globalActivityTracker.rejectChange(data.path);
+      if (data?.workspace && (!WorkspaceContext.getRoot() || WorkspaceContext.getRoot() !== data.workspace)) {
+        try { await workspaceManager.select(data.workspace); agent.setWorkspace(data.workspace); } catch {}
+      }
+      await globalActivityTracker.rejectChange(data.path, data.originalContent);
     }
   });
 
-  socket.on('accept_all_changes', async () => {
-    await globalActivityTracker.acceptAllChanges();
+  socket.on('accept_all_changes', async (data?: { files?: any[]; workspace?: string }) => {
+    if (data?.workspace && (!WorkspaceContext.getRoot() || WorkspaceContext.getRoot() !== data.workspace)) {
+      try { await workspaceManager.select(data.workspace); agent.setWorkspace(data.workspace); } catch {}
+    }
+    await globalActivityTracker.acceptAllChanges(data?.files);
   });
 
-  socket.on('reject_all_changes', async () => {
-    await globalActivityTracker.rejectAllChanges();
+  socket.on('reject_all_changes', async (data?: { files?: any[]; workspace?: string }) => {
+    if (data?.workspace && (!WorkspaceContext.getRoot() || WorkspaceContext.getRoot() !== data.workspace)) {
+      try { await workspaceManager.select(data.workspace); agent.setWorkspace(data.workspace); } catch {}
+    }
+    await globalActivityTracker.rejectAllChanges(data?.files);
   });
 
   // Allow client to request chat history for a specific workspace or global

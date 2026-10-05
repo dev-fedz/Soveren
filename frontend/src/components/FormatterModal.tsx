@@ -2,11 +2,7 @@ import React, { useState } from 'react';
 import {
   Sparkles,
   Check,
-  AlertTriangle,
-  Copy,
-  Terminal,
   X,
-  Settings,
   Sliders,
   ChevronDown,
 } from 'lucide-react';
@@ -30,6 +26,7 @@ export interface FormatterModalProps {
   onToggleFormatOnSave: (enabled: boolean) => void;
   onFormatDocument: () => void;
   onSelectFormatter: (language: string, formatterId: string) => void;
+  onInstallFormatter?: (id: string) => Promise<any>;
   allFormatters: FormatterInfo[];
 }
 
@@ -45,18 +42,9 @@ export function FormatterModal({
   onSelectFormatter,
   allFormatters,
 }: FormatterModalProps) {
-  const [copied, setCopied] = useState(false);
   const [showAllFormatters, setShowAllFormatters] = useState(false);
 
   if (!isOpen) return null;
-
-  const handleCopyInstall = () => {
-    if (activeFormatter?.installHelp) {
-      navigator.clipboard.writeText(activeFormatter.installHelp);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    }
-  };
 
   const compatibleFormatters = allFormatters.filter((f) =>
     f.languages.includes(activeLanguage.toLowerCase()),
@@ -89,45 +77,20 @@ export function FormatterModal({
                 </div>
               </div>
               <div className="formatter-status-badge">
-                {activeFormatter?.installed ? (
-                  <span className="badge-installed">
-                    <Check size={12} /> {activeFormatter.name} Installed
-                  </span>
-                ) : (
-                  <span className="badge-unavailable">
-                    <AlertTriangle size={12} /> {activeFormatter?.name || 'Formatter'} Unavailable
-                  </span>
-                )}
+                <span className="badge-installed">
+                  <Check size={12} /> {activeFormatter?.name || 'Code Formatter'} Ready (Integrated)
+                </span>
               </div>
             </div>
 
-            {/* Unavailable Formatter Alert */}
-            {activeFormatter && !activeFormatter.installed && (
-              <div className="formatter-alert">
-                <div className="formatter-alert-title">
-                  <AlertTriangle size={14} /> Formatter Unavailable
-                </div>
-                <p className="formatter-alert-text">
-                  <strong>{activeFormatter.name}</strong> is required to format this{' '}
-                  <strong>{activeLanguage}</strong> file, but the CLI binary is not installed on
-                  your system.
-                </p>
-                {activeFormatter.installHelp && (
-                  <div className="formatter-install-box">
-                    <div className="formatter-install-header">
-                      <Terminal size={12} /> Installation Command
-                    </div>
-                    <div className="formatter-install-code">
-                      <code>{activeFormatter.installHelp}</code>
-                      <button className="copy-btn" onClick={handleCopyInstall}>
-                        {copied ? <Check size={12} /> : <Copy size={12} />}
-                        <span>{copied ? 'Copied!' : 'Copy'}</span>
-                      </button>
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
+            {/* Integrated Formatter Banner */}
+            <div className="formatter-integrated-banner">
+              <Sparkles size={14} className="text-amber" />
+              <span>
+                <strong>{activeFormatter?.name || 'Code Formatter'}</strong> is built-in and ready for{' '}
+                <strong>{activeLanguage}</strong> files.
+              </span>
+            </div>
 
             {/* Action Buttons */}
             <div className="formatter-actions-grid">
@@ -170,7 +133,7 @@ export function FormatterModal({
               >
                 {compatibleFormatters.map((f) => (
                   <option key={f.id} value={f.id}>
-                    {f.name} {f.installed ? '(Installed ✓)' : '(Not Installed ⚠)'}
+                    {f.name} (Integrated ✓)
                   </option>
                 ))}
                 <option value="none">None (Disable formatting)</option>
@@ -215,11 +178,7 @@ export function FormatterModal({
                           <strong>{item.name}</strong>
                         </td>
                         <td>
-                          {item.installed ? (
-                            <span className="status-pill pill-ok">Ready ✓</span>
-                          ) : (
-                            <span className="status-pill pill-warn">Install ⚠</span>
-                          )}
+                          <span className="status-pill pill-ok">Ready ✓</span>
                         </td>
                         <td>
                           <code className="cmd-snippet">{item.command}</code>

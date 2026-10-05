@@ -5,6 +5,7 @@ import remarkGfm from 'remark-gfm';
 import { AgentActivityTimeline } from './AgentActivityTimeline';
 import { ChangedFilesPanel } from './ChangedFilesPanel';
 import { AgentActivity, AgentSession, ChangedFile } from '../types/agent';
+import { FileCode } from 'lucide-react';
 
 // --- Types ---
 interface ChatMessage {
@@ -13,6 +14,7 @@ interface ChatMessage {
   type?: 'step' | 'response' | 'error';
   activities?: AgentActivity[];
   changedFiles?: ChangedFile[];
+  fileReviewTags?: Record<string, 'accepted' | 'rejected'>;
 }
 
 // --- Error Boundary ---
@@ -108,10 +110,10 @@ export function MessageRenderer({
   isLastAgentMessage?: boolean;
   activeSession?: AgentSession | null;
   onSelectDiff?: (file: ChangedFile) => void;
-  onAcceptChange?: (path: string) => void;
-  onRejectChange?: (path: string) => void;
-  onAcceptAll?: () => void;
-  onRejectAll?: () => void;
+  onAcceptChange?: (path: string, file?: ChangedFile) => void;
+  onRejectChange?: (path: string, file?: ChangedFile) => void;
+  onAcceptAll?: (files?: ChangedFile[]) => void;
+  onRejectAll?: (files?: ChangedFile[]) => void;
   diffViewFile?: ChangedFile | null;
   onNewSession?: () => void;
 }) {
@@ -149,6 +151,7 @@ export function MessageRenderer({
           <AgentActivityTimeline
             activities={activitiesToShow}
             session={activeSession}
+            fileReviewTags={msg.fileReviewTags}
             onSelectDiff={onSelectDiff}
             onNewSession={onNewSession}
             hideHeader={true}
@@ -169,6 +172,24 @@ export function MessageRenderer({
             onRejectAll={onRejectAll || (() => {})}
             selectedFilePath={diffViewFile?.path}
           />
+        </div>
+      )}
+
+      {/* Review status tags once files are accepted or rejected */}
+      {!isUser && msg.fileReviewTags && Object.keys(msg.fileReviewTags).length > 0 && (
+        <div className="msg-review-tags-wrapper">
+          {Object.entries(msg.fileReviewTags).map(([fPath, status]) => {
+            const basename = fPath.split('/').pop() || fPath;
+            return (
+              <div key={fPath} className={`file-review-tag tag-${status}`}>
+                <FileCode size={13} className="tag-file-icon" />
+                <span className="tag-file-name">{basename}</span>
+                <span className={`tag-status-badge badge-${status}`}>
+                  {status === 'accepted' ? 'accepted' : 'rejected'}
+                </span>
+              </div>
+            );
+          })}
         </div>
       )}
 
