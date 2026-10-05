@@ -46,8 +46,14 @@ export class Agent {
     };
   }
 
+  private serviceLifecycleNotifier?: (event: 'started' | 'stopped', port: number) => void;
+
   setServiceResolver(resolver: ServiceResolver) {
     this.serviceResolver = resolver;
+  }
+
+  setServiceLifecycleNotifier(notifier: (event: 'started' | 'stopped', port: number) => void) {
+    this.serviceLifecycleNotifier = notifier;
   }
 
   async getRunningServices(): Promise<ServiceInfo[]> {
@@ -428,20 +434,22 @@ export class Agent {
     const workspaceRoot = WorkspaceContext.getRoot();
     const workspaceName = WorkspaceContext.getName() || path.basename(workspaceRoot);
     const workspaceStructure = WorkspaceContext.getWorkspaceStructureSummary();
+    const detectedBackend = WorkspaceContext.findProjectDirectoryByRole('backend') || 'withgod-be';
+    const detectedFrontend = WorkspaceContext.findProjectDirectoryByRole('frontend') || 'withgod-fe';
 
     const workspaceInfo = `\nActive Workspace: ${workspaceName} (${workspaceRoot})
 
 Detected Projects & Subdirectories in Workspace:
 ${workspaceStructure}
 
-You have full, active access to inspect files, search code, read file ranges, edit files, format code, and execute terminal commands within this workspace directory. When running commands (such as docker compose, python manage.py, or npm run), always specify the target project directory in "cwd" (e.g. "${WorkspaceContext.findProjectDirectoryByRole('backend') || 'withgod-be'}").`;
+You have full, active access to inspect files, search code, read file ranges, edit files, format code, and execute terminal commands within this workspace directory. When running commands (such as docker compose, python manage.py, or npm run), always specify the target project directory in "cwd" (e.g. "${detectedBackend}" or "${detectedFrontend}").`;
 
     const allTools = toolRegistry.getAllTools();
     // Core tools get full schemas in the prompt; advanced/workspace tools are listed concisely
     // to avoid overwhelming smaller models with 40+ full JSON schemas
     const coreToolNames = new Set([
       'read_file', 'read_file_range', 'list_directory', 'search_files', 'write_file', 'edit_file',
-      'run_command', 'execute_command', 'format_code', 'find_symbol',
+      'run_command', 'format_code', 'find_symbol',
       'git_status', 'git_diff', 'git_log', 'git_branch', 'git_commit',
       'open_browser', 'navigate_browser',
     ]);
@@ -449,11 +457,13 @@ You have full, active access to inspect files, search code, read file ranges, ed
     const advancedTools = allTools.filter(t => !coreToolNames.has(t.name) && !t.name.startsWith('search_text') && t.name !== 'search' && t.name !== 'read' && t.name !== 'shell' && t.name !== 'terminal' && t.name !== 'format' && t.name !== 'weather' && t.name !== 'list_files' && t.name !== 'list_dir' && t.name !== 'ls');
     const toolsPrompt = coreTools.length > 0
       ? coreTools.map(t => `- ${t.name}: ${t.description}\n  Schema: ${JSON.stringify(t.inputSchema)}`).join('\n')
-        + (advancedTools.length > 0 ? '\n\nAdditional Workspace Tools (call with [tool_name: {args}]):\n' + advancedTools.map(t => `- ${t.name}: ${t.description}`).join('\n') : '')
+      + (advancedTools.length > 0 ? '\n\nAdditional Workspace Tools (call with [tool_name: {args}]):\n' + advancedTools.map(t => `- ${t.name}: ${t.description}`).join('\n') : '')
       : 'No tools currently registered.';
 
-    // Fetch task memory: summaries of previously completed tasks for this workspace
-    const taskMemory = await this.getCompletedTaskSummaries(targetWorkspace);
+    // Fetch task memory ONLY if user explicitly asked about past tasks/history.
+    // Smaller models (e.g. qwen2.5-coder:7b) get derailed if past task summaries, errors, or logs are in the prompt.
+    const isAskingAboutHistory = /\b(what\s+did\s+(?:we|you)\s+do|past\s+tasks|previous\s+tasks|task\s+history|what\s+has\s+been\s+done)\b/i.test(text);
+    const taskMemory = isAskingAboutHistory ? await this.getCompletedTaskSummaries(targetWorkspace) : '';
 
     const systemPrompt: Message = {
       role: 'system',
@@ -462,8 +472,12 @@ ${workspaceInfo}
 
 Available Tools:
 ${toolsPrompt}
-${skillsContext}
-${taskMemory}
+${skillsContext}${taskMemory ? `\n\n${taskMemory}` : ''}
+
+CURRENT TASK FOCUS DIRECTIVE:
+1. Focus 100% of your attention and actions strictly on the user's CURRENT request.
+2. Do NOT recite, analyze, debate, or get distracted by past tasks, past errors, or historical sessions.
+3. Directly execute the requested action using the available tools immediately.
 
 IMPORTANT INSTRUCTIONS:
 1. You HAVE ACTIVE ACCESS to all tools listed above. You CAN and MUST call tools to inspect, read, search, write, edit files, and execute terminal commands.
@@ -477,7 +491,7 @@ Tool Call Examples:
 - Search project files: [search_files: {"pattern": "package.json"}]
 - Read a file: [read_file: {"path": "package.json"}]
 - Read lines: [read_file_range: {"path": "src/index.ts", "startLine": 1, "endLine": 60}]
-- Run terminal command: [run_command: {"command": "ls -la"}] or [execute_command: {"command": "npm test"}]
+- Run terminal command: [run_command: {"command": "npm run dev", "isBackground": true}] or [run_command: {"command": "ls -la"}]
 - Open browser: [open_browser: {"url": "http://localhost:8000/admin/"}] or [open_browser: {"url": "http://localhost:3000"}]
 - Navigate browser: [navigate_browser: {"url": "http://localhost:8000/admin/"}]
 - Edit file: [edit_file: {"path": "src/index.ts", "search": "oldCode", "replace": "newCode"}]
@@ -585,7 +599,6 @@ Browser & Dev Server Awareness:
 
       if (iterations === 1) {
         const lower = text.trim().toLowerCase();
-        const detectedBackend = WorkspaceContext.findProjectDirectoryByRole('backend') || undefined;
         const isRootProjectAccess =
           (/(?:^|\W)\/app(?:\/|\W|$)/i.test(lower) || /\b(?:root\s+project|agentic\s+ai(?:\s+project)?|planner-agent)\b/i.test(lower)) &&
           /\b(?:read|list|inspect|show|open|view|see|check|search|explore|files?|dir(?:ectory)?|what)\b/i.test(lower);
@@ -593,15 +606,76 @@ Browser & Dev Server Awareness:
         if (isRootProjectAccess) {
           globalActivityTracker.completeActivity(reasonAct.id);
           return "Access denied: Reading or inspecting the AI agent's root project is strictly prohibited to prevent confusion. Only projects and directories from your local machine may be accessed, prioritizing the currently opened project.";
-        } else if (/^(?:please\s+)?(?:stop|kill|terminate|halt)\s+(?:the\s+)?backend\b/i.test(lower)) {
+        } else if (/^(?:please\s+)?(?:stop|close|kill|terminate|halt|shut\s*down|turn\s*off)\s+(?:the\s+)?backend\b/i.test(lower)) {
           toolCall = { name: 'run_command', args: { command: 'docker compose stop', cwd: detectedBackend } };
           content = 'Stopping the backend service...';
-        } else if (/^(?:please\s+)?(?:start|run|launch)\s+(?:the\s+)?backend\b/i.test(lower)) {
+        } else if (/^(?:please\s+)?(?:start|run|launch|open|turn\s*on)\s+(?:the\s+)?backend\b/i.test(lower)) {
           toolCall = { name: 'run_command', args: { command: 'docker compose up -d', cwd: detectedBackend } };
           content = 'Starting the backend service...';
         } else if (/^(?:please\s+)?(?:restart)\s+(?:the\s+)?backend\b/i.test(lower)) {
           toolCall = { name: 'run_command', args: { command: 'docker compose restart', cwd: detectedBackend } };
           content = 'Restarting the backend service...';
+        } else if (/^(?:please\s+)?(?:stop|close|kill|terminate|halt|shut\s*down|turn\s*off)\s+(?:the\s+)?frontend\b/i.test(lower)) {
+          toolCall = { name: 'run_command', args: { command: 'fuser -k -9 3000/tcp 2>/dev/null || true; pkill -9 -f "next dev|next-server|vite|react-scripts" 2>/dev/null || true; npx kill-port 3000 2>/dev/null || true', isBackground: false } };
+          content = 'Stopping the frontend service on port 3000...';
+        } else if (/^(?:please\s+)?(?:start|run|launch|open|turn\s*on)\s+(?:the\s+)?frontend\b/i.test(lower) || /^(?:npm\s+run\s+dev|npm\s+start)\b/i.test(lower)) {
+          toolCall = { name: 'run_command', args: { command: 'npm run dev', cwd: detectedFrontend, isBackground: true } };
+          content = `Starting the frontend service (npm run dev in ${detectedFrontend})...`;
+        } else if (/^(?:please\s+)?restart\s+(?:the\s+)?frontend\b/i.test(lower)) {
+          toolCall = { name: 'run_command', args: { command: 'fuser -k -9 3000/tcp 2>/dev/null || true; pkill -9 -f "next dev|next-server|vite|react-scripts" 2>/dev/null || true; npx kill-port 3000 2>/dev/null || true; npm run dev', cwd: detectedFrontend, isBackground: true } };
+          content = `Restarting the frontend service in ${detectedFrontend}...`;
+        } else if (
+          /\b(?:verify|check|test|probe)\b.*\b(?:frontend|port\s*3000)\b/i.test(lower) ||
+          /\b(?:is\s+(?:the\s+)?frontend\s+running)\b/i.test(lower) ||
+          /\b(?:is\s+port\s*3000\s+(?:running|active|open|in\s+use|up))\b/i.test(lower)
+        ) {
+          let isRunning = false;
+          let httpStatus = 0;
+          try {
+            const probe = await fetch('http://localhost:3000', { signal: AbortSignal.timeout(1500) });
+            isRunning = true;
+            httpStatus = probe.status;
+          } catch {
+            try {
+              const probeHost = await fetch('http://host.docker.internal:3000', { signal: AbortSignal.timeout(1500) });
+              isRunning = true;
+              httpStatus = probeHost.status;
+            } catch {
+              const services = await this.getRunningServices();
+              const found = services.find(s => s.port === 3000 && s.status === 'running');
+              if (found) isRunning = true;
+            }
+          }
+
+          if (isRunning) {
+            toolCall = { name: 'open_browser', args: { url: 'http://localhost:3000' } };
+            content = `The frontend is active and running on http://localhost:3000 (HTTP ${httpStatus || 200}). Navigating the browser panel...`;
+          } else {
+            globalActivityTracker.completeActivity(reasonAct.id);
+            const responseMsg = `The frontend is currently **NOT running** on port 3000 (no active process or server responding on port 3000).\n\nWould you like me to start the frontend server for you?\n1. Say **"run the frontend"** or **"do the number 1"** to execute \`npm run dev\` in \`${detectedFrontend}\`.`;
+            this.context.addMessage({ role: 'assistant', content: responseMsg });
+            globalActivityTracker.setSessionStatus('completed');
+            const completedAct = globalActivityTracker.startActivity({
+              type: 'completed',
+              title: 'Frontend port 3000 check completed',
+              description: 'Frontend is not running on port 3000',
+              model: currentReasonRouted.modelInfo,
+            });
+            globalActivityTracker.completeActivity(completedAct.id);
+            return responseMsg;
+          }
+        } else if (/^(?:do\s+(?:the\s+)?(?:number\s+)?1|option\s+1|number\s+1|1|start\s+it|run\s+it)\b/i.test(lower)) {
+          const history = this.context.getHistory();
+          const lastAssistant = [...history].reverse().find(m => m.role === 'assistant' || (m as any).role === 'agent');
+          if (lastAssistant && typeof lastAssistant.content === 'string') {
+            if (/npm\s+run\s+dev|start\s+the\s+frontend|run\s+the\s+frontend/i.test(lastAssistant.content)) {
+              toolCall = { name: 'run_command', args: { command: 'npm run dev', cwd: detectedFrontend, isBackground: true } };
+              content = `Executing option 1: Starting frontend dev server in ${detectedFrontend}...`;
+            } else if (/docker\s+compose\s+up|start\s+the\s+backend|run\s+the\s+backend/i.test(lastAssistant.content)) {
+              toolCall = { name: 'run_command', args: { command: 'docker compose up -d', cwd: detectedBackend } };
+              content = `Executing option 1: Starting backend service in ${detectedBackend}...`;
+            }
+          }
         } else if (/\b(list\s+(?:the\s+)?files|list\s+(?:the\s+)?dir|show\s+(?:the\s+)?files|what\s+files)\b/i.test(lower)) {
           if (!WorkspaceContext.hasActiveWorkspace()) {
             globalActivityTracker.completeActivity(reasonAct.id);
@@ -1194,6 +1268,83 @@ Browser & Dev Server Awareness:
             type: 'completed',
             title: 'Navigation completed',
             description: finalMsg,
+            model: codingRouted.modelInfo,
+          });
+          globalActivityTracker.completeActivity(completedAct.id);
+          return finalMsg;
+        }
+
+        // 1. If the tool was run_command stopping services (evaluated FIRST to avoid false matches on pkill/fuser)
+        const isStopCmd = (name === 'run_command' || name === 'execute_command') && (
+          /docker\s+compose\s+(?:stop|down|kill)/i.test(args.command || '') ||
+          /(?:kill-port\s*3000|fuser.*3000|3000\/tcp|pkill.*(?:next|react-scripts|vite|npm run dev)|killall.*node)/i.test(args.command || '')
+        );
+
+        if (isStopCmd) {
+          const isFrontend = /(?:kill-port\s*3000|fuser.*3000|3000\/tcp|pkill.*(?:next|react-scripts|vite|npm run dev)|killall.*node)/i.test(args.command || '');
+          const serviceName = isFrontend ? 'Frontend' : 'Backend';
+          if (isFrontend) {
+            globalWorkspaceState.closeBrowser('Frontend', 'http://localhost:3000');
+            this.serviceLifecycleNotifier?.('stopped', 3000);
+          } else {
+            globalWorkspaceState.closeBrowser('Backend', 'http://localhost:8000');
+            this.serviceLifecycleNotifier?.('stopped', 8000);
+          }
+          const finalMsg = `${serviceName} service stopped successfully.`;
+          this.context.addMessage({ role: 'assistant', content: finalMsg });
+          globalActivityTracker.setSessionStatus('completed');
+          const completedAct = globalActivityTracker.startActivity({
+            type: 'completed',
+            title: `${serviceName} stopped`,
+            description: finalMsg,
+            model: codingRouted.modelInfo,
+          });
+          globalActivityTracker.completeActivity(completedAct.id);
+          return finalMsg;
+        }
+
+        // 2. If the tool was run_command starting the frontend dev server
+        const isStartFrontendCmd = (name === 'run_command' || name === 'execute_command') &&
+          /(?:^|[;&|\s])(?:npm|yarn|pnpm|bun)\s+(?:run\s+)?(?:dev|start)\b/i.test(args.command || '') &&
+          !/(?:pkill|kill|killall|fuser|kill-port)\b/i.test(args.command || '');
+
+        if (isStartFrontendCmd) {
+          this.serviceLifecycleNotifier?.('started', 3000);
+          const finalMsg = `Started frontend development server with \`npm run dev\` in \`${args.cwd || detectedFrontend}\`.\n\nThe frontend is running on [http://localhost:3000](http://localhost:3000). Navigating the browser panel...`;
+          const browserTool = toolRegistry.getTool('open_browser');
+          if (browserTool) {
+            try { await browserTool.execute({ url: 'http://localhost:3000' }); } catch {}
+          }
+          this.context.addMessage({ role: 'assistant', content: finalMsg });
+          globalActivityTracker.setSessionStatus('completed');
+          const completedAct = globalActivityTracker.startActivity({
+            type: 'completed',
+            title: 'Frontend server started',
+            description: `Started frontend on port 3000 in ${args.cwd || detectedFrontend}`,
+            model: codingRouted.modelInfo,
+          });
+          globalActivityTracker.completeActivity(completedAct.id);
+          return finalMsg;
+        }
+
+        // 3. If the tool was run_command starting backend services
+        const isStartBackendCmd = (name === 'run_command' || name === 'execute_command') &&
+          /docker\s+compose\s+(?:up|start)\b/i.test(args.command || '') &&
+          !/docker\s+compose\s+(?:stop|down|kill)\b/i.test(args.command || '');
+
+        if (isStartBackendCmd) {
+          this.serviceLifecycleNotifier?.('started', 8000);
+          const finalMsg = `Started backend services with \`docker compose up -d\` in \`${args.cwd || detectedBackend}\`.\n\nNavigating browser panel to Django Admin...`;
+          const browserTool = toolRegistry.getTool('open_browser');
+          if (browserTool) {
+            try { await browserTool.execute({ url: 'http://localhost:8000/admin/' }); } catch {}
+          }
+          this.context.addMessage({ role: 'assistant', content: finalMsg });
+          globalActivityTracker.setSessionStatus('completed');
+          const completedAct = globalActivityTracker.startActivity({
+            type: 'completed',
+            title: 'Backend services started',
+            description: `Started backend with docker compose up in ${args.cwd || detectedBackend}`,
             model: codingRouted.modelInfo,
           });
           globalActivityTracker.completeActivity(completedAct.id);

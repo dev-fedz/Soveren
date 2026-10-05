@@ -1,5 +1,5 @@
 import React from 'react';
-import { AlertTriangle, RefreshCw, ExternalLink, Loader2, WifiOff, ShieldAlert, Globe } from 'lucide-react';
+import { AlertTriangle, RefreshCw, ExternalLink, Loader2, WifiOff, ShieldAlert, Globe, X } from 'lucide-react';
 
 export type DiagnosticType =
   | 'connection_refused'
@@ -27,6 +27,7 @@ interface BrowserDiagnosticProps {
   diagnostic: DiagnosticInfo;
   onRetry: () => void;
   onOpenExternal: () => void;
+  onClose?: () => void;
 }
 
 const DIAGNOSTIC_MESSAGES: Record<DiagnosticType, { title: string; description: string; icon: React.ReactNode }> = {
@@ -82,7 +83,7 @@ const DIAGNOSTIC_MESSAGES: Record<DiagnosticType, { title: string; description: 
   },
 };
 
-export function BrowserDiagnostic({ diagnostic, onRetry, onOpenExternal }: BrowserDiagnosticProps) {
+export function BrowserDiagnostic({ diagnostic, onRetry, onOpenExternal, onClose }: BrowserDiagnosticProps) {
   const message = DIAGNOSTIC_MESSAGES[diagnostic.type] || DIAGNOSTIC_MESSAGES.unknown;
   const isSearching = diagnostic.searching || diagnostic.type === 'reconnecting';
 
@@ -137,6 +138,12 @@ export function BrowserDiagnostic({ diagnostic, onRetry, onOpenExternal }: Brows
             <ExternalLink size={14} />
             <span>Open in Browser</span>
           </button>
+          {onClose && (
+            <button className="diagnostic-btn diagnostic-btn-secondary" onClick={onClose} title="Close this tab">
+              <X size={14} />
+              <span>Close Tab</span>
+            </button>
+          )}
         </div>
       </div>
     </div>

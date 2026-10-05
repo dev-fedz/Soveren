@@ -104,7 +104,7 @@ export interface AgentWorkspaceState {
     warningsCount: number;
     networkFailedCount: number;
   };
-  fileBadges?: Record<string, 'Created' | 'Modified' | 'Deleted' | 'created' | 'modified' | 'deleted'>;
+  fileBadges: Record<string, 'created' | 'modified' | 'deleted' | 'Created' | 'Modified' | 'Deleted'>;
 }
 
 export type WorkspaceState = AgentWorkspaceState;

@@ -37,7 +37,7 @@ test-results/
 .agent_index/
 .artifacts/
 .agents/
-workspace/
+/workspace/
 *.sqlite
 *.sqlite3
 *.db

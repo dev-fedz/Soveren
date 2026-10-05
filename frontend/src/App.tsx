@@ -838,7 +838,13 @@ export default function AIIDE() {
     sock.on('agent_workspace_state', (wsState: WorkspaceState) => {
       const surface = wsState.activeSurface;
       if (surface) {
-        setActiveTab(surface);
+        // Only switch away from current non-code surface (browser, inspect, images, docs) to 'code'
+        // if an active file was explicitly opened.
+        // Never kick the user out of the browser or inspector panel unexpectedly!
+        const isCurrentNonCode = activeTabRef.current && activeTabRef.current !== 'code';
+        if (!isCurrentNonCode || surface !== 'code' || Boolean(wsState.activeFilePath)) {
+          setActiveTab(surface);
+        }
       }
       if (wsState.activeFilePath) {
         // CRITICAL: Only activate file tab if activeSurface is explicitly 'code' or unspecified.

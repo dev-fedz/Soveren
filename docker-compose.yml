@@ -5,6 +5,7 @@ services:
     command: ["npx", "tsx", "backend/src/server.ts"]
     ports:
       - "5001:5001"
+      - "3000:3000"
     environment:
       - PORT=5001
       - HOST=0.0.0.0

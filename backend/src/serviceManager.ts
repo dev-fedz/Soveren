@@ -543,6 +543,45 @@ export class ServiceManager extends EventEmitter {
   }
 
   /**
+   * Explicitly report a service as stopped by port or ID.
+   * Cancels recovery monitoring and immediately notifies all connected clients.
+   */
+  reportServiceStopped(portOrId: number | string): void {
+    let matched = false;
+    for (const service of this.services.values()) {
+      if (service.port === portOrId || service.id === portOrId) {
+        service.status = 'stopped';
+        this.cancelRecoveryTimer(service.id);
+        this.emitEvent({ type: 'stopped', service });
+        matched = true;
+      }
+    }
+
+    if (!matched && typeof portOrId === 'number') {
+      const syntheticService: DetectedService = {
+        id: `service-${portOrId}`,
+        name: `Service :${portOrId}`,
+        port: portOrId,
+        url: `http://localhost:${portOrId}`,
+        host: 'localhost',
+        protocol: 'http',
+        hasUI: true,
+        status: 'stopped',
+        lastSeen: Date.now(),
+        previousPorts: [],
+        projectPath: this.workspacePath || '',
+      };
+      this.emitEvent({ type: 'stopped', service: syntheticService });
+    }
+
+    this.emitServicesUpdated();
+  }
+
+  private emitServicesUpdated(): void {
+    this.emit('services_updated', this.getServices());
+  }
+
+  /**
    * Register a user-entered manual URL as a proxied service.
    */
   async registerManualService(rawUrl: string, title?: string): Promise<DetectedService | null> {

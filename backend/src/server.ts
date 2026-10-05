@@ -181,6 +181,18 @@ agent.setServiceResolver(async () => {
   }
 });
 
+// Connect agent service lifecycle events to dynamic service manager and socket clients
+agent.setServiceLifecycleNotifier((event, port) => {
+  if (event === 'stopped') {
+    serviceManager.reportServiceStopped(port);
+    io.emit('browser_service_stopped', { port });
+    globalWorkspaceState.closeBrowser(undefined, `:${port}`);
+    io.emit('agent_workspace_state', globalWorkspaceState.getState());
+  } else if (event === 'started') {
+    serviceManager.discoverServices().catch(() => {});
+  }
+});
+
 // Listen to terminal command outputs for instant service discovery
 ShellTool.addOutputListener((output, command, pid) => {
   serviceManager.reportServiceFromOutput(output, command, pid);
@@ -326,6 +338,15 @@ app.post('/workspace/chat-history', (req, res) => {
   const key = (!workspace || workspace === '__global__' || workspace === 'global') ? '__global__' : workspace;
   if (Array.isArray(messages)) {
     chatMemoryCache.set(key, messages);
+    if (messages.length === 0) {
+      agent.clearWorkspaceHistory(key);
+    } else {
+      const converted = messages.map((m: any) => ({
+        role: (m.role === 'agent' ? 'assistant' : m.role === 'user' ? 'user' : 'system') as any,
+        content: m.content,
+      }));
+      agent.setWorkspaceHistory(converted, key);
+    }
   }
   res.json({ status: 'ok', count: (chatMemoryCache.get(key) || []).length });
 });
@@ -1394,6 +1415,7 @@ app.get('/ai/agent/session', (req, res) => {
 app.post('/ai/agent/reset', (req, res) => {
   const { workspace: ws } = req.body || {};
   const targetWs = ws || (workspaceManager.isActive() ? (workspaceManager.getState().path || '__global__') : '__global__');
+  agent.clearWorkspaceHistory(targetWs);
   const emptySession = globalActivityTracker.resetSession('Task Workflow', targetWs);
   io.emit('agent_session', emptySession);
   res.json({ status: 'ok', session: emptySession });
@@ -1402,6 +1424,7 @@ app.post('/ai/agent/reset', (req, res) => {
 app.post('/ai/agent/new-session', (req, res) => {
   const { workspace: ws } = req.body || {};
   const targetWs = ws || (workspaceManager.isActive() ? (workspaceManager.getState().path || '__global__') : '__global__');
+  agent.clearWorkspaceHistory(targetWs);
   const emptySession = globalActivityTracker.resetSession('Task Workflow', targetWs);
   io.emit('agent_session', emptySession);
   res.json({ status: 'ok', session: emptySession });
@@ -1611,6 +1634,7 @@ io.on('connection', (socket) => {
 
   socket.on('new_agent_session', (data?: { workspace?: string }) => {
     const ws = data?.workspace || (workspaceManager.isActive() ? (workspaceManager.getState().path || '__global__') : '__global__');
+    agent.clearWorkspaceHistory(ws);
     const emptySession = globalActivityTracker.resetSession('Task Workflow', ws);
     io.emit('agent_session', emptySession);
   });

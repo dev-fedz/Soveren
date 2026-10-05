@@ -277,6 +277,27 @@ Without 'cwd', the command runs from the workspace root.`;
     return false;
   }
 
+  /**
+   * Produce a clean execution environment for user workspace commands.
+   * Strips the agent container's internal PORT (5001) so user dev servers (Next.js, Vite, React, Express)
+   * default to their expected standard ports (e.g. 3000, 5173, 8000) rather than attempting to bind
+   * to port 5001 and crashing with EADDRINUSE.
+   */
+  private getSanitizedEnv(command?: string): NodeJS.ProcessEnv {
+    const env: NodeJS.ProcessEnv = { ...process.env, FORCE_COLOR: '0' };
+
+    // Strip internal agent backend PORT so child processes don't try to bind to port 5001
+    delete env.PORT;
+
+    // For frontend projects/dev servers, if running Next.js or React without an explicit port flag,
+    // explicitly set PORT to 3000 so Next.js starts on its standard port 3000.
+    if (command && /\b(next(\s+dev)?|withgod-fe)\b/i.test(command) && !/--port|-p\s+\d+/i.test(command)) {
+      env.PORT = '3000';
+    }
+
+    return env;
+  }
+
   async execute(input: {
     command: string;
     cwd?: string;
@@ -334,7 +355,7 @@ Without 'cwd', the command runs from the workspace root.`;
           timeout: timeoutMs,
           cwd,
           maxBuffer: 10 * 1024 * 1024, // 10MB buffer
-          env: { ...process.env, FORCE_COLOR: '0' }, // Disable color codes for clean output
+          env: this.getSanitizedEnv(input.command),
         });
 
         const durationMs = Date.now() - startTime;
@@ -433,6 +454,7 @@ Without 'cwd', the command runs from the workspace root.`;
         shell: true,
         detached: process.platform !== 'win32',
         stdio: ['ignore', 'pipe', 'pipe'],
+        env: this.getSanitizedEnv(command),
       });
 
       if (!child.pid) {
@@ -536,10 +558,11 @@ Without 'cwd', the command runs from the workspace root.`;
         if (!resolved) {
           resolved = true;
           clearTimeout(timer);
+          const hasError = (code !== null && code !== 0) || Boolean(stderrAccum && /Error: listen EADDRINUSE|Failed to start server|fatal error|ERR_/i.test(stderrAccum));
           resolve({
-            success: code === 0,
+            success: !hasError,
             content: this.formatResult({
-              success: code === 0,
+              success: !hasError,
               command,
               cwd,
               stdout: stdoutAccum || '(empty)',
@@ -548,7 +571,10 @@ Without 'cwd', the command runs from the workspace root.`;
               durationMs: Date.now() - new Date(startedAt).getTime(),
               startedAt,
               finishedAt: new Date().toISOString(),
+              background: false,
+              autoResolvedNote,
             }),
+            error: hasError ? (stderrAccum || `Process exited early with code ${code}`) : undefined,
           });
         }
       });

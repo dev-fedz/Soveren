@@ -197,11 +197,15 @@ export function useBrowserServices(socketRef: React.MutableRefObject<Socket | nu
         case 'stopped':
           setServices(prev => prev.map(s => s.id === service.id ? service : s));
           setTabs(prev => prev.map(t => {
-            if (t.serviceId === service.id) {
+            const matches =
+              t.serviceId === service.id ||
+              (service.port && t.port === service.port) ||
+              (service.port && (t.url.includes(`:${service.port}`) || t.proxyUrl?.includes(`:${service.port}`)));
+            if (matches) {
               return {
                 ...t,
-                status: 'reconnecting',
-                error: 'Server stopped. Searching for replacement...',
+                status: 'error',
+                error: 'Server stopped. The development server is no longer running.',
               };
             }
             return t;
@@ -211,7 +215,11 @@ export function useBrowserServices(socketRef: React.MutableRefObject<Socket | nu
         case 'restarted':
           setServices(prev => prev.map(s => s.id === service.id ? service : s));
           setTabs(prev => prev.map(t => {
-            if (t.serviceId === service.id) {
+            const matches =
+              t.serviceId === service.id ||
+              (service.port && t.port === service.port) ||
+              (service.port && (t.url.includes(`:${service.port}`) || t.proxyUrl?.includes(`:${service.port}`)));
+            if (matches) {
               const tabProxyUrl = getServiceProxyUrl(service);
               return {
                 ...t,
@@ -230,7 +238,11 @@ export function useBrowserServices(socketRef: React.MutableRefObject<Socket | nu
           setServices(prev => prev.filter(s => s.id !== service.id));
           // Don't remove the tab immediately — show error state
           setTabs(prev => prev.map(t => {
-            if (t.serviceId === service.id) {
+            const matches =
+              t.serviceId === service.id ||
+              (service.port && t.port === service.port) ||
+              (service.port && (t.url.includes(`:${service.port}`) || t.proxyUrl?.includes(`:${service.port}`)));
+            if (matches) {
               return { ...t, status: 'error', error: 'Service removed' };
             }
             return t;
@@ -243,8 +255,26 @@ export function useBrowserServices(socketRef: React.MutableRefObject<Socket | nu
       setServices(servicesList);
     };
 
+    const handleDirectServiceStopped = (data: { port?: number; serviceId?: string }) => {
+      setTabs(prev => prev.map(t => {
+        const matches =
+          (data.serviceId && t.serviceId === data.serviceId) ||
+          (data.port && t.port === data.port) ||
+          (data.port && (t.url.includes(`:${data.port}`) || t.proxyUrl?.includes(`:${data.port}`)));
+        if (matches) {
+          return {
+            ...t,
+            status: 'error',
+            error: 'Server stopped. The development server is no longer running.',
+          };
+        }
+        return t;
+      }));
+    };
+
     sock.on('browser_service', handleServiceEvent);
     sock.on('browser_services_list', handleServicesList);
+    sock.on('browser_service_stopped', handleDirectServiceStopped);
 
     // Fetch initial state
     fetchServices();
@@ -252,6 +282,7 @@ export function useBrowserServices(socketRef: React.MutableRefObject<Socket | nu
     return () => {
       sock.off('browser_service', handleServiceEvent);
       sock.off('browser_services_list', handleServicesList);
+      sock.off('browser_service_stopped', handleDirectServiceStopped);
     };
   }, [socketRef.current, ensureTabForService, fetchServices]);
 
@@ -266,19 +297,41 @@ export function useBrowserServices(socketRef: React.MutableRefObject<Socket | nu
   }, []);
 
   const closeTab = useCallback((tabId: string) => {
+    const currentTabs = tabsRef.current;
+    const tabToClose = currentTabs.find(t => t.id === tabId);
+    const remaining = currentTabs.filter(t => t.id !== tabId);
+    const wasActive = tabId === activeTabId;
+    const nextActive = wasActive && remaining.length > 0 ? remaining[remaining.length - 1] : null;
+
     setTabs(prev => {
       const updated = prev.filter(t => t.id !== tabId);
       // If we closed the active tab, activate the last one
-      if (tabId === activeTabId && updated.length > 0) {
-        const newActive = updated[updated.length - 1];
-        newActive.active = true;
-        setActiveTabId(newActive.id);
+      if (wasActive && updated.length > 0) {
+        const active = updated[updated.length - 1];
+        active.active = true;
+        setActiveTabId(active.id);
       } else if (updated.length === 0) {
         setActiveTabId(null);
       }
       return updated;
     });
-  }, [activeTabId]);
+
+    if (socketRef.current) {
+      if (nextActive) {
+        socketRef.current.emit('workspace_action', {
+          type: 'open_browser',
+          serviceId: nextActive.serviceId,
+          url: nextActive.url,
+        });
+      } else {
+        socketRef.current.emit('workspace_action', {
+          type: 'close_browser',
+          serviceId: tabToClose?.serviceId,
+          url: tabToClose?.url,
+        });
+      }
+    }
+  }, [activeTabId, socketRef]);
 
   const addManualTab = useCallback(async (url: string, title?: string) => {
     const id = `manual-${Date.now()}`;

@@ -56,6 +56,7 @@ export function BrowserPanel({
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const urlInputRef = useRef<HTMLInputElement>(null);
   const healthCheckTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const failedProbesRef = useRef<number>(0);
 
   // Sync URL bar with active tab
   useEffect(() => {
@@ -67,41 +68,111 @@ export function BrowserPanel({
   // Iframe load handlers
   const handleIframeLoad = useCallback(() => {
     if (activeTab) {
+      failedProbesRef.current = 0;
       onUpdateTabStatus(activeTab.id, 'ready');
     }
   }, [activeTab?.id, onUpdateTabStatus]);
 
   const handleIframeError = useCallback(() => {
     if (activeTab) {
-      onUpdateTabStatus(activeTab.id, 'error', 'Failed to load page');
+      onUpdateTabStatus(activeTab.id, 'error', 'Server stopped. The development server is no longer running.');
     }
   }, [activeTab?.id, onUpdateTabStatus]);
 
-  // Health check for error/reconnecting tabs
+  // Active health & liveness check for active tab
   useEffect(() => {
     if (healthCheckTimerRef.current) {
       clearInterval(healthCheckTimerRef.current);
       healthCheckTimerRef.current = null;
     }
 
-    if (activeTab && (activeTab.status === 'error' || activeTab.status === 'reconnecting')) {
+    if (!activeTab) return;
+
+    failedProbesRef.current = 0;
+
+    if (activeTab.status === 'loading') {
+      // Pre-flight check: verify development server is actually alive
+      let cancelled = false;
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 2500);
+      const probeUrl = activeTab.proxyUrl || activeTab.url;
+
+      fetch(probeUrl, {
+        method: 'HEAD',
+        mode: 'no-cors',
+        signal: controller.signal,
+        cache: 'no-store',
+      })
+        .then((res) => {
+          clearTimeout(timeout);
+          if (cancelled) return;
+          if (res.status === 502 || res.status === 504) {
+            onUpdateTabStatus(activeTab.id, 'error', 'Server stopped. The development server is no longer running.');
+          }
+        })
+        .catch(() => {
+          clearTimeout(timeout);
+          if (cancelled) return;
+          onUpdateTabStatus(activeTab.id, 'error', 'Server stopped. The development server is no longer running.');
+        });
+
+      return () => {
+        cancelled = true;
+        clearTimeout(timeout);
+        controller.abort();
+      };
+    } else if (activeTab.status === 'error' || activeTab.status === 'reconnecting') {
+      // Recovery check: wait until the service comes back online
       healthCheckTimerRef.current = setInterval(async () => {
         try {
           const controller = new AbortController();
-          const timeout = setTimeout(() => controller.abort(), 3000);
-          await fetch(activeTab.proxyUrl || activeTab.url, {
+          const timeout = setTimeout(() => controller.abort(), 2000);
+          const probeUrl = activeTab.proxyUrl || activeTab.url;
+          const res = await fetch(probeUrl, {
             method: 'HEAD',
             mode: 'no-cors',
             signal: controller.signal,
+            cache: 'no-store',
           });
           clearTimeout(timeout);
-          // If we reach here, the service is reachable — reload
+          if (res.status === 502 || res.status === 504) {
+            return;
+          }
+          // Service is reachable — reload
           onUpdateTabStatus(activeTab.id, 'loading');
           if (iframeRef.current) {
             iframeRef.current.src = activeTab.proxyUrl || activeTab.url;
           }
         } catch {
           // Still unreachable
+        }
+      }, 2500);
+    } else if (activeTab.status === 'ready') {
+      // Liveness check: detect if the service stopped or crashed while tab is open
+      healthCheckTimerRef.current = setInterval(async () => {
+        try {
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 2000);
+          const probeUrl = activeTab.proxyUrl || activeTab.url;
+          const res = await fetch(probeUrl, {
+            method: 'HEAD',
+            mode: 'no-cors',
+            signal: controller.signal,
+            cache: 'no-store',
+          });
+          clearTimeout(timeout);
+          if (res.status === 502 || res.status === 504) {
+            failedProbesRef.current += 1;
+          } else {
+            failedProbesRef.current = 0;
+          }
+        } catch {
+          failedProbesRef.current += 1;
+        }
+
+        // If probe fails (2 consecutive failed checks, or connection refused), immediately mark server stopped
+        if (failedProbesRef.current >= 2) {
+          onUpdateTabStatus(activeTab.id, 'error', 'Server stopped. The development server is no longer running.');
         }
       }, 3000);
     }
@@ -184,10 +255,29 @@ export function BrowserPanel({
   }, [urlBarValue, activeTab, onUpdateTabStatus, onAddManualTab]);
 
   // Handle reload
-  const handleReload = useCallback(() => {
-    if (activeTab && iframeRef.current) {
-      onUpdateTabStatus(activeTab.id, 'loading');
-      iframeRef.current.src = activeTab.proxyUrl || activeTab.url;
+  const handleReload = useCallback(async () => {
+    if (!activeTab) return;
+    onUpdateTabStatus(activeTab.id, 'loading');
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 2000);
+      const probeUrl = activeTab.proxyUrl || activeTab.url;
+      const res = await fetch(probeUrl, {
+        method: 'HEAD',
+        mode: 'no-cors',
+        signal: controller.signal,
+        cache: 'no-store',
+      });
+      clearTimeout(timeout);
+      if (res.status === 502 || res.status === 504) {
+        onUpdateTabStatus(activeTab.id, 'error', 'Server stopped. The development server is no longer running.');
+        return;
+      }
+      if (iframeRef.current) {
+        iframeRef.current.src = probeUrl;
+      }
+    } catch {
+      onUpdateTabStatus(activeTab.id, 'error', 'Server stopped. The development server is no longer running.');
     }
   }, [activeTab, onUpdateTabStatus]);
 
@@ -207,7 +297,9 @@ export function BrowserPanel({
     let type: DiagnosticType = 'unknown';
     const error = activeTab.error?.toLowerCase() || '';
 
-    if (error.includes('connection refused') || error.includes('err_connection_refused')) {
+    if (error.includes('stopped') || error.includes('server stopped')) {
+      type = 'server_stopped';
+    } else if (error.includes('connection refused') || error.includes('err_connection_refused')) {
       type = 'connection_refused';
     } else if (error.includes('timeout')) {
       type = 'connection_timeout';
@@ -223,8 +315,6 @@ export function BrowserPanel({
       type = 'cert_error';
     } else if (activeTab.status === 'reconnecting') {
       type = 'reconnecting';
-    } else if (error.includes('stopped') || error.includes('server stopped')) {
-      type = 'server_stopped';
     }
 
     return {
@@ -373,6 +463,7 @@ export function BrowserPanel({
             diagnostic={diagnostic}
             onRetry={handleReload}
             onOpenExternal={handleOpenExternal}
+            onClose={() => activeTab && onCloseTab(activeTab.id)}
           />
         ) : activeTab ? (
           <iframe

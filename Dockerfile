@@ -18,6 +18,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ripgrep \
     iproute2 \
     procps \
+    psmisc \
     lsof \
     curl \
     ca-certificates \
