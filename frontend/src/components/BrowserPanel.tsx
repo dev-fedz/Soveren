@@ -377,7 +377,7 @@ export function BrowserPanel({
         ) : activeTab ? (
           <iframe
             ref={iframeRef}
-            key={activeTab.id}
+            key={`${activeTab.id}-${activeTab.proxyUrl || activeTab.url}`}
             src={activeTab.proxyUrl || activeTab.url}
             className="browser-iframe"
             title={activeTab.title}

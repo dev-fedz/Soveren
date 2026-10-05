@@ -338,6 +338,34 @@ export function useBrowserServices(socketRef: React.MutableRefObject<Socket | nu
     }));
   }, []);
 
+  const navigateTab = useCallback((tabId: string, newUrl: string) => {
+    setActiveTabId(tabId);
+    setTabs(prev => prev.map(t => {
+      if (t.id === tabId) {
+        let proxyUrl = t.proxyUrl;
+        if (t.serviceId && t.proxyUrl && t.proxyUrl.includes(t.serviceId)) {
+          const baseProxy = t.proxyUrl.split(t.serviceId)[0] + t.serviceId;
+          try {
+            const parsed = new URL(newUrl);
+            proxyUrl = `${baseProxy}${parsed.pathname}${parsed.search}${parsed.hash}`;
+          } catch {
+            proxyUrl = `${baseProxy}/${newUrl.replace(/^\/+/, '')}`;
+          }
+        } else {
+          proxyUrl = newUrl;
+        }
+        return {
+          ...t,
+          url: newUrl,
+          proxyUrl,
+          active: true,
+          status: 'loading' as const,
+        };
+      }
+      return { ...t, active: false };
+    }));
+  }, []);
+
   const activeTab = tabs.find(t => t.id === activeTabId) || null;
 
   return {
@@ -348,6 +376,7 @@ export function useBrowserServices(socketRef: React.MutableRefObject<Socket | nu
     selectTab,
     closeTab,
     addManualTab,
+    navigateTab,
     updateTabPath,
     updateTabStatus,
     refreshServices,

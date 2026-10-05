@@ -238,6 +238,124 @@ export class Agent {
     globalActivityTracker.stopSession();
   }
 
+  /**
+   * Fetch compact, rich summaries of previously completed tasks for the given workspace.
+   * This gives the agent awareness of what has already been done, preventing redundant work
+   * and allowing the agent to continuously grow and build upon previous accomplishments.
+   */
+  async getCompletedTaskSummaries(workspaceKey?: string | null): Promise<string> {
+    try {
+      const port = process.env.PORT || '5001';
+      const wsParam = encodeURIComponent(workspaceKey || '__global__');
+      let tasks: Array<{ id: string; title: string; timestamp: number; messages?: any[] }> = [];
+
+      try {
+        const res = await fetch(`http://localhost:${port}/workspace/tasks?workspace=${wsParam}`, {
+          signal: AbortSignal.timeout(2000),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          tasks = data.tasks || [];
+        }
+      } catch {}
+
+      // If workspace is specific and has few tasks, also retrieve global tasks for context
+      if (wsParam !== '__global__' && tasks.length < 5) {
+        try {
+          const globalRes = await fetch(`http://localhost:${port}/workspace/tasks?workspace=__global__`, {
+            signal: AbortSignal.timeout(2000),
+          });
+          if (globalRes.ok) {
+            const globalData = await globalRes.json();
+            const globalTasks = globalData.tasks || [];
+            const existingIds = new Set(tasks.map(t => t.id));
+            for (const gt of globalTasks) {
+              if (!existingIds.has(gt.id)) {
+                tasks.push(gt);
+              }
+            }
+          }
+        } catch {}
+      }
+
+      if (tasks.length === 0) return '';
+
+      // Build rich memory: title, request, outcome, key tools/actions, and modified files
+      const summaries = tasks.slice(0, 15).map((task, idx) => {
+        const msgs = Array.isArray(task.messages) ? task.messages : [];
+        const userMsgs = msgs.filter((m: any) => m.role === 'user' && m.content);
+        const lastAgentMsg = [...msgs].reverse().find((m: any) => (m.role === 'agent' || m.role === 'assistant') && m.content);
+
+        const firstUserText = userMsgs.length > 0
+          ? String(userMsgs[0].content).trim().slice(0, 100).replace(/\n/g, ' ')
+          : task.title;
+
+        // Extract concise outcome from last agent response
+        let outcome = '';
+        if (lastAgentMsg) {
+          const contentStr = typeof lastAgentMsg.content === 'string' ? lastAgentMsg.content : '';
+          const firstLine = contentStr.split('\n')[0].replace(/[#*`_]/g, '').trim();
+          if (firstLine) {
+            outcome = firstLine.slice(0, 110);
+          }
+        }
+
+        // Extract key actions / tools
+        const actions: string[] = [];
+        for (const m of msgs) {
+          if (Array.isArray(m.activities)) {
+            for (const a of m.activities) {
+              if (a.title && (a.type === 'command' || a.type === 'editing' || a.type === 'test')) {
+                actions.push(a.title.slice(0, 50));
+              }
+            }
+          }
+        }
+        const uniqueActions = Array.from(new Set(actions)).slice(0, 3);
+
+        // Check for reviewed or changed files
+        const touchedFiles: string[] = [];
+        for (const m of msgs) {
+          if (m.fileReviewTags && typeof m.fileReviewTags === 'object') {
+            touchedFiles.push(...Object.keys(m.fileReviewTags).map(p => p.split('/').pop() || p));
+          } else if (Array.isArray(m.changedFiles)) {
+            touchedFiles.push(...m.changedFiles.map((f: any) => (f.path ? f.path.split('/').pop() : '')));
+          }
+        }
+        const uniqueFiles = Array.from(new Set(touchedFiles.filter(Boolean))).slice(0, 4);
+
+        const timeAgo = this.formatTimeAgo(task.timestamp);
+        let item = `${idx + 1}. [${timeAgo}] "${task.title}": Request: "${firstUserText}"`;
+        if (outcome) {
+          item += `\n   -> Outcome: ${outcome}`;
+        }
+        if (uniqueActions.length > 0) {
+          item += `\n   -> Actions: ${uniqueActions.join('; ')}`;
+        }
+        if (uniqueFiles.length > 0) {
+          item += `\n   -> Files: ${uniqueFiles.join(', ')}`;
+        }
+        return item;
+      });
+
+      return `\nWORKSPACE TASK MEMORY (Past completed tasks & outcomes — DO NOT repeat these):\n${summaries.join('\n')}\n\nIMPORTANT MEMORY INSTRUCTIONS:\n1. The tasks above have already been completed in prior sessions. DO NOT repeat work, commands, or file edits that were already completed.\n2. If a service (e.g. backend or frontend) was already started or navigated to, build upon it instead of trying to restart or re-explore from scratch.\n3. When the user asks to continue or asks a follow-up, refer to and grow from this past task memory.`;
+    } catch {
+      return '';
+    }
+  }
+
+  private formatTimeAgo(timestamp: number): string {
+    const now = Date.now();
+    const diff = now - timestamp;
+    const minutes = Math.floor(diff / 60000);
+    if (minutes < 1) return 'just now';
+    if (minutes < 60) return `${minutes}m ago`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours}h ago`;
+    const days = Math.floor(hours / 24);
+    return `${days}d ago`;
+  }
+
   private deriveTaskTitle(text: string): string {
     const trimmed = text.trim();
     if (trimmed.startsWith('/plan')) {
@@ -334,6 +452,9 @@ You have full, active access to inspect files, search code, read file ranges, ed
         + (advancedTools.length > 0 ? '\n\nAdditional Workspace Tools (call with [tool_name: {args}]):\n' + advancedTools.map(t => `- ${t.name}: ${t.description}`).join('\n') : '')
       : 'No tools currently registered.';
 
+    // Fetch task memory: summaries of previously completed tasks for this workspace
+    const taskMemory = await this.getCompletedTaskSummaries(targetWorkspace);
+
     const systemPrompt: Message = {
       role: 'system',
       content: `You are an expert AI-native coding agent. You don't just write code; you manage and inspect codebases directly.
@@ -342,6 +463,7 @@ ${workspaceInfo}
 Available Tools:
 ${toolsPrompt}
 ${skillsContext}
+${taskMemory}
 
 IMPORTANT INSTRUCTIONS:
 1. You HAVE ACTIVE ACCESS to all tools listed above. You CAN and MUST call tools to inspect, read, search, write, edit files, and execute terminal commands.
@@ -514,13 +636,14 @@ Browser & Dev Server Awareness:
           }
         } else {
           const isBoth = /\b(?:frontend\s*(?:or|\/|and)\s*backend|backend\s*(?:or|\/|and)\s*frontend)\b/i.test(lower) ||
-            /\b(?:open|navigate|go|show|launch)\s+(?:the\s+)?(?:frontend|backend)\s+(?:or|\/|and)\s+(?:the\s+)?(?:backend|frontend)\b/i.test(lower);
+            /\b(?:open|navigate|go|show|launch)\s+(?:the\s+)?(?:frontend|backend)\s+(?:or|\/|and)\s+(?:the\s+)?(?:backend|frontend)\b/i.test(lower) ||
+            /\b(?:open|navigate|go|show|launch)\s+(?:the\s+)?project(?:\s+(?:in|to|on)\s+(?:the\s+)?browser)?\b/i.test(lower);
           const isBackend = !isBoth && (
-            /\b(?:navigate|open|go|show|launch)\s+(?:to\s+)?(?:the\s+)?backend(?:\s+ui)?\b/i.test(lower) ||
+            /\b(?:navigate|open|go|show|launch)\s+(?:to\s+)?(?:the\s+)?backend(?:\s+ui)?(?:\s+(?:in|to|on)\s+(?:the\s+)?browser)?\b/i.test(lower) ||
             /\b(?:django\s+admin)\b/i.test(lower)
           );
           const isFrontend = !isBoth && (
-            /\b(?:navigate|open|go|show|launch)\s+(?:to\s+)?(?:the\s+)?frontend(?:\s+ui)?\b/i.test(lower) ||
+            /\b(?:navigate|open|go|show|launch)\s+(?:to\s+)?(?:the\s+)?frontend(?:\s+ui)?(?:\s+(?:in|to|on)\s+(?:the\s+)?browser)?\b/i.test(lower) ||
             /\b(?:react(?:\s+js)?\s+ui)\b/i.test(lower)
           );
 

@@ -16,7 +16,7 @@ import { AgentActivityTimeline } from './components/AgentActivityTimeline';
 import { ChangedFilesPanel } from './components/ChangedFilesPanel';
 import { AgentSession, AgentActivity, ChangedFile } from './types/agent';
 import { useWorkspace } from './hooks/useWorkspace';
-import { useBrowserServices } from './hooks/useBrowserServices';
+import { useBrowserServices, type BrowserTab } from './hooks/useBrowserServices';
 import { BrowserPanel } from './components/BrowserPanel';
 import { InspectPanel } from './components/InspectPanel';
 import { ImagesPanel } from './components/ImagesPanel';
@@ -181,6 +181,37 @@ function sanitizeTaskMessages(messages: any[]): any[] {
   });
 }
 
+/**
+ * Force-finalize ALL changedFiles in a message list.
+ * Used when restoring a historical task — past sessions' file changes
+ * should NEVER show accept/reject buttons since they can't be acted upon.
+ * Any remaining changedFiles are moved to fileReviewTags as 'accepted' (historical).
+ */
+function finalizeHistoricalMessages(messages: any[]): any[] {
+  if (!Array.isArray(messages)) return [];
+  return messages.map((msg) => {
+    if (!msg || typeof msg !== 'object') return msg;
+    const reviewTags = { ...(msg.fileReviewTags || {}) };
+    const changedFiles = Array.isArray(msg.changedFiles) ? msg.changedFiles : [];
+
+    // Move ALL remaining changedFiles into reviewTags (they are historical)
+    for (const f of changedFiles) {
+      if (f && f.path) {
+        // Preserve existing review status, default to 'accepted' for historical files
+        if (!reviewTags[f.path]) {
+          reviewTags[f.path] = f.status === 'rejected' ? 'rejected' : 'accepted';
+        }
+      }
+    }
+
+    return {
+      ...msg,
+      changedFiles: undefined, // Remove all changedFiles — they are now in reviewTags
+      fileReviewTags: Object.keys(reviewTags).length > 0 ? reviewTags : undefined,
+    };
+  });
+}
+
 function updateMessageListWithFileReview(
   msgList: any[],
   filePath: string,
@@ -247,7 +278,7 @@ function sanitizeTaskHistoryList(list: any[]): any[] {
       seenKeys.add(dedupKey);
       deduped.push({
         ...task,
-        messages: sanitizeTaskMessages(msgs),
+        messages: finalizeHistoricalMessages(sanitizeTaskMessages(msgs)),
       });
     }
   }
@@ -259,6 +290,8 @@ export default function AIIDE() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [activeTab, setActiveTab] = useState<WorkspaceSurface>('code');
+  const activeTabRef = useRef<WorkspaceSurface>(activeTab);
+  activeTabRef.current = activeTab;
   const [code, setCode] = useState('// Select a file to view code');
   const [fileName, setFileName] = useState('Welcome');
 
@@ -530,9 +563,42 @@ export default function AIIDE() {
     selectTab: selectBrowserTab,
     closeTab: closeBrowserTab,
     addManualTab: addManualBrowserTab,
+    navigateTab: navigateBrowserTab,
     updateTabStatus: updateBrowserTabStatus,
     refreshServices: refreshBrowserServices,
   } = useBrowserServices(socketRef);
+
+  const browserTabsRef = useRef<BrowserTab[]>(browserTabs);
+  browserTabsRef.current = browserTabs;
+  const selectBrowserTabRef = useRef(selectBrowserTab);
+  selectBrowserTabRef.current = selectBrowserTab;
+  const addManualBrowserTabRef = useRef(addManualBrowserTab);
+  addManualBrowserTabRef.current = addManualBrowserTab;
+  const navigateBrowserTabRef = useRef(navigateBrowserTab);
+  navigateBrowserTabRef.current = navigateBrowserTab;
+
+  const navigateBrowserTo = useCallback((url: string, serviceTitle?: string) => {
+    if (!url) return;
+    setActiveTab('browser');
+    const cleanUrl = url.trim();
+    const currentTabs = browserTabsRef.current || [];
+    const normalizedTarget = cleanUrl.replace(/\/+$/, '');
+    const existing = currentTabs.find(
+      (t) =>
+        t.url === cleanUrl ||
+        t.url.replace(/\/+$/, '') === normalizedTarget ||
+        (t.port && cleanUrl.includes(`:${t.port}`))
+    );
+    if (existing) {
+      if (existing.url !== cleanUrl) {
+        navigateBrowserTabRef.current(existing.id, cleanUrl);
+      } else {
+        selectBrowserTabRef.current(existing.id);
+      }
+    } else {
+      addManualBrowserTabRef.current(cleanUrl, serviceTitle || 'Browser');
+    }
+  }, []);
 
   // --- Chat persistence ---
   const persistChats = useCallback((updatedChats: Record<string, ChatMessage[]>) => {
@@ -770,14 +836,20 @@ export default function AIIDE() {
 
     // Workspace state broadcast from backend
     sock.on('agent_workspace_state', (wsState: WorkspaceState) => {
-      if (wsState.activeSurface) {
-        setActiveTab(wsState.activeSurface);
+      const surface = wsState.activeSurface;
+      if (surface) {
+        setActiveTab(surface);
       }
       if (wsState.activeFilePath) {
-        openFile(wsState.activeFilePath, undefined, undefined, true);
+        // CRITICAL: Only activate file tab if activeSurface is explicitly 'code' or unspecified.
+        // Never hijack tab away when activeSurface is 'browser', 'inspect', 'images', or 'docs'!
+        const shouldActivateFile = !surface || surface === 'code';
+        openFile(wsState.activeFilePath, undefined, undefined, shouldActivateFile);
       }
       if (wsState.activeBrowserTab) {
-        selectBrowserTab(wsState.activeBrowserTab);
+        selectBrowserTabRef.current(wsState.activeBrowserTab);
+      } else if (surface === 'browser' && wsState.activeBrowserUrl) {
+        navigateBrowserTo(wsState.activeBrowserUrl, wsState.activeBrowserService || 'Backend');
       }
       if (wsState.activeInspectPanel) {
         setActiveInspectPanel(wsState.activeInspectPanel as InspectorPanelType);
@@ -809,6 +881,10 @@ export default function AIIDE() {
       } else if (action.type === 'open_browser') {
         triggerAgentCursor('browser', 'Opening Browser');
         setActiveTab('browser');
+        const targetUrl = action.url || action.target || '';
+        if (targetUrl) {
+          navigateBrowserTo(targetUrl, action.serviceId || 'Backend');
+        }
       } else if (action.type === 'open_inspector' || action.type === 'focus_console' || action.type === 'focus_network') {
         triggerAgentCursor('inspect', 'Opening Inspect');
         setActiveTab('inspect');
@@ -1003,8 +1079,14 @@ export default function AIIDE() {
 
       // Synchronize file operations: if agent is accessing or modifying a file, open/activate tab
       const targetPath = (activity.metadata?.filePath as string) || (activity.metadata?.target as string) || (activity.details?.target as string) || (activity.path as string);
-      if (targetPath && typeof targetPath === 'string' && (targetPath.includes('.') || targetPath.includes('/'))) {
-        const shouldActivate = activity.type === 'editing' || activity.type === 'creating';
+      if (
+        targetPath &&
+        typeof targetPath === 'string' &&
+        !targetPath.startsWith('http://') &&
+        !targetPath.startsWith('https://') &&
+        (targetPath.includes('.') || targetPath.includes('/'))
+      ) {
+        const shouldActivate = (activity.type === 'editing' || activity.type === 'creating') && (!activeTabRef.current || activeTabRef.current === 'code');
         openFile(targetPath, undefined, undefined, shouldActivate);
       }
     });
@@ -2068,7 +2150,9 @@ export default function AIIDE() {
 
   const handleRestoreTask = useCallback((task: any) => {
     const wsKey = getWorkspaceKey(workspace.path);
-    const sanitizedMessages = sanitizeTaskMessages(task.messages || []);
+    // First sanitize (dedup reviewed files), then finalize ALL remaining changedFiles
+    // so historical tasks NEVER show accept/reject buttons
+    const sanitizedMessages = finalizeHistoricalMessages(sanitizeTaskMessages(task.messages || []));
 
     // Load selected task into active session without spurious auto-archiving
     activeTaskIdRef.current = task.id;
