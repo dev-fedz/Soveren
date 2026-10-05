@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { FolderOpen, X, Folder, ArrowUp, Home, Monitor, Layers, Compass, Loader2 } from 'lucide-react';
+import { FolderOpen, X, Folder, ArrowUp, Compass, Loader2, ChevronDown, ChevronUp, Trash2 } from 'lucide-react';
 import axios from 'axios';
 
 const API = 'http://localhost:5001';
@@ -19,10 +19,10 @@ interface BrowseDir {
   path: string;
 }
 
-interface Shortcut {
-  label: string;
+interface RecentWorkspace {
   path: string;
-  icon?: string;
+  name: string;
+  lastOpened?: number;
 }
 
 export function DirectoryPicker({
@@ -46,8 +46,11 @@ export function DirectoryPicker({
   const [parentBrowseDir, setParentBrowseDir] = useState<string | null>(null);
   const [homeDir, setHomeDir] = useState<string>('');
   const [directories, setDirectories] = useState<BrowseDir[]>([]);
-  const [shortcuts, setShortcuts] = useState<Shortcut[]>([]);
   const [isDocker, setIsDocker] = useState(false);
+
+  // Recent Workspaces history state (limited to 3 by default)
+  const [recentWorkspaces, setRecentWorkspaces] = useState<RecentWorkspace[]>([]);
+  const [showAllWorkspaces, setShowAllWorkspaces] = useState(false);
 
   useEffect(() => {
     if (suggestedName) {
@@ -55,12 +58,109 @@ export function DirectoryPicker({
     }
   }, [suggestedName]);
 
-  // Load directories when modal opens
+  // Load directories and workspace history when modal opens
   useEffect(() => {
     if (isOpen) {
       loadDirectory('');
+      loadRecentWorkspaces();
     }
   }, [isOpen]);
+
+  const formatDisplayPath = (p: string) => {
+    if (!p) return '';
+    if (p === '/host') return 'Local Machine';
+    if (p.startsWith('/host/')) {
+      return `~/${p.slice(6)}`;
+    }
+    return p;
+  };
+
+  const loadRecentWorkspaces = async () => {
+    try {
+      const res = await axios.get(`${API}/workspace/recent`);
+      let list: RecentWorkspace[] = [];
+      if (Array.isArray(res.data?.recent)) {
+        list = res.data.recent.filter((w: RecentWorkspace) => w?.path && w.path !== '/app' && w.path !== '/');
+      }
+
+      // Check localStorage for any additional recent workspaces
+      try {
+        const local = localStorage.getItem('ai_native_recent_workspaces');
+        if (local) {
+          const parsed = JSON.parse(local);
+          if (Array.isArray(parsed)) {
+            for (const item of parsed) {
+              if (item?.path && item.path !== '/app' && item.path !== '/' && !list.some((w) => w.path === item.path)) {
+                list.push(item);
+              }
+            }
+          }
+        }
+      } catch { /* ignore */ }
+
+      // Check project chats for previously opened workspaces
+      try {
+        const savedChats = localStorage.getItem('ai_ide_project_chats');
+        if (savedChats) {
+          const parsedChats = JSON.parse(savedChats);
+          for (const key of Object.keys(parsedChats)) {
+            if (key.startsWith('proj:')) {
+              const p = key.slice(5);
+              if (p && p !== '/app' && p !== '/' && !list.some((w) => w.path === p)) {
+                list.push({
+                  path: p,
+                  name: p.split('/').filter(Boolean).pop() || p,
+                  lastOpened: Date.now(),
+                });
+              }
+            }
+          }
+        }
+      } catch { /* ignore */ }
+
+      setRecentWorkspaces(list);
+    } catch {
+      // Backend request fallback to localStorage
+    }
+  };
+
+  const handleDeleteWorkspace = async (targetPath: string) => {
+    // 1. Immediately remove from state
+    setRecentWorkspaces((prev) => prev.filter((w) => w.path !== targetPath));
+
+    // 2. Clear selection if the deleted workspace was selected
+    if (dirPath === targetPath) {
+      setDirPath('');
+      setPathInput('');
+    }
+
+    // 3. Remove from localStorage recent workspaces
+    try {
+      const local = localStorage.getItem('ai_native_recent_workspaces');
+      if (local) {
+        const parsed = JSON.parse(local);
+        if (Array.isArray(parsed)) {
+          const filtered = parsed.filter((item: any) => item?.path !== targetPath);
+          localStorage.setItem('ai_native_recent_workspaces', JSON.stringify(filtered));
+        }
+      }
+    } catch { /* ignore */ }
+
+    // 4. Remove from localStorage project chats
+    try {
+      const savedChats = localStorage.getItem('ai_ide_project_chats');
+      if (savedChats) {
+        const parsedChats = JSON.parse(savedChats);
+        delete parsedChats[`proj:${targetPath}`];
+        localStorage.setItem('ai_ide_project_chats', JSON.stringify(parsedChats));
+      }
+    } catch { /* ignore */ }
+
+    // 5. Delete on backend
+    try {
+      await axios.delete(`${API}/workspace/recent`, { data: { path: targetPath } });
+    } catch { /* ignore */ }
+  };
 
   const loadDirectory = async (dir: string) => {
     setLoadingBrowse(true);
@@ -72,13 +172,27 @@ export function DirectoryPicker({
       setParentBrowseDir(res.data.parent);
       setHomeDir(res.data.home);
       setDirectories(res.data.directories || []);
-      setDirPath(res.data.current);
-      setPathInput(res.data.current);
-      if (Array.isArray(res.data.shortcuts)) {
-        setShortcuts(res.data.shortcuts);
+      const current = res.data.current || '';
+      if (current === '/host' || !current) {
+        setDirPath('');
+        setPathInput('');
+      } else {
+        setDirPath(current);
+        setPathInput(current.startsWith('/host/') ? `~/${current.slice(6)}` : current);
       }
       if (typeof res.data.isDocker === 'boolean') {
         setIsDocker(res.data.isDocker);
+      }
+      if (Array.isArray(res.data.recentWorkspaces) && res.data.recentWorkspaces.length > 0) {
+        setRecentWorkspaces((prev) => {
+          const combined = [...res.data.recentWorkspaces];
+          for (const p of prev) {
+            if (!combined.some((c) => c.path === p.path)) {
+              combined.push(p);
+            }
+          }
+          return combined;
+        });
       }
     } catch (e: any) {
       setError(e.response?.data?.error || e.message || 'Failed to read directory');
@@ -102,7 +216,6 @@ export function DirectoryPicker({
       if (!res.data.cancelled && res.data.path) {
         setDirPath(res.data.path);
         setPathInput(res.data.path);
-        // If opening project and no project name required, select immediately
         if (!showProjectName) {
           onSelect(res.data.path);
         }
@@ -114,15 +227,34 @@ export function DirectoryPicker({
     }
   };
 
+  const handleNavigateInput = () => {
+    const raw = pathInput.trim();
+    if (!raw || raw === '~' || raw === '/host' || raw === 'host' || raw === 'host/') {
+      loadDirectory('/host');
+      setPathInput('');
+      return;
+    }
+    if (raw.startsWith('~/')) {
+      loadDirectory(`/host/${raw.slice(2)}`);
+      return;
+    }
+    loadDirectory(raw);
+  };
+
   const handleSelectCurrent = () => {
-    const target = dirPath.trim() || pathInput.trim() || currentBrowseDir;
-    if (!target) {
+    let target = dirPath.trim() || pathInput.trim() || currentBrowseDir;
+    if (target.startsWith('~/')) {
+      target = `/host/${target.slice(2)}`;
+    }
+    if (!target || target === '/host') {
       setError('Please select a directory.');
       return;
     }
     setError('');
     onSelect(target, showProjectName ? projectName.trim() : undefined);
   };
+
+  const displayedWorkspaces = showAllWorkspaces ? recentWorkspaces : recentWorkspaces.slice(0, 3);
 
   return (
     <div className="picker-overlay">
@@ -139,17 +271,8 @@ export function DirectoryPicker({
 
         <p className="picker-description">{description}</p>
 
-        {/* Docker Mode Banner or Native OS Chooser */}
-        {isDocker ? (
-          <div className="picker-docker-box">
-            <div className="picker-docker-banner">
-              <span className="picker-docker-badge">🐳 Local Machine Connected</span>
-              <span className="picker-docker-text">
-                Your computer's files are mapped to <code>/host</code> (Desktop, Documents, Projects). Use the quick jump buttons below or enter any path (e.g. <code>~/Desktop</code>).
-              </span>
-            </div>
-          </div>
-        ) : (
+        {/* Native OS Chooser (when not running in Docker) */}
+        {!isDocker && (
           <div className="picker-native-box">
             <button
               type="button"
@@ -175,53 +298,12 @@ export function DirectoryPicker({
           </div>
         )}
 
-        {/* Quick Location Shortcuts */}
-        <div className="picker-shortcuts">
-          <span className="picker-shortcuts-label">Quick Jump:</span>
-          {shortcuts.length > 0 ? (
-            shortcuts.map((sc) => (
-              <button
-                key={sc.path}
-                type="button"
-                className={`picker-chip ${currentBrowseDir === sc.path ? 'picker-chip-active' : ''}`}
-                onClick={() => loadDirectory(sc.path)}
-                title={sc.path}
-              >
-                {sc.icon === 'home' && <Home size={12} />}
-                {sc.icon === 'desktop' && <Monitor size={12} />}
-                {sc.icon === 'projects' && <Layers size={12} />}
-                {sc.icon === 'app' && <Folder size={12} />}
-                {sc.label}
-              </button>
-            ))
-          ) : (
-            <>
-              {homeDir && (
-                <button
-                  type="button"
-                  className="picker-chip"
-                  onClick={() => loadDirectory(homeDir)}
-                  title="Home directory"
-                >
-                  <Home size={12} /> Home
-                </button>
-              )}
-              <button
-                type="button"
-                className="picker-chip"
-                onClick={() => loadDirectory('/app')}
-                title="App repository"
-              >
-                <Folder size={12} /> /app
-              </button>
-            </>
-          )}
-        </div>
+
 
         {/* Visual Directory Browser */}
         <div className="picker-browser-card">
           <div className="picker-browser-path-bar">
-            {parentBrowseDir && (
+            {parentBrowseDir && parentBrowseDir !== '/' && (
               <button
                 type="button"
                 className="picker-up-btn"
@@ -241,16 +323,16 @@ export function DirectoryPicker({
               }}
               onKeyDown={(e) => {
                 if (e.key === 'Enter') {
-                  loadDirectory(pathInput);
+                  handleNavigateInput();
                 }
               }}
-              placeholder={isDocker ? "e.g. /host, ~/Desktop, /projects, or /app" : "e.g. ~/Desktop/projects"}
+              placeholder="Enter folder path (e.g. ~/Desktop/my-project)..."
               title="Type path and press Enter"
             />
             <button
               type="button"
               className="picker-go-btn"
-              onClick={() => loadDirectory(pathInput)}
+              onClick={handleNavigateInput}
               title="Navigate to directory"
             >
               Go
@@ -271,7 +353,7 @@ export function DirectoryPicker({
                   className={`picker-folder-row ${dirPath === dir.path ? 'picker-folder-selected' : ''}`}
                   onClick={() => {
                     setDirPath(dir.path);
-                    setPathInput(dir.path);
+                    setPathInput(dir.path.startsWith('/host/') ? `~/${dir.path.slice(6)}` : dir.path);
                   }}
                   onDoubleClick={() => {
                     loadDirectory(dir.path);
@@ -300,12 +382,94 @@ export function DirectoryPicker({
         <div className="picker-selected-summary">
           <span className="picker-selected-label">Selected Directory:</span>
           <span className="picker-selected-value truncate" title={dirPath || currentBrowseDir}>
-            {dirPath || currentBrowseDir}
-            {isDocker && (dirPath || currentBrowseDir).startsWith('/host') && (
-              <span className="picker-selected-alias"> (Host: ~{(dirPath || currentBrowseDir).slice(5)})</span>
+            {dirPath && dirPath !== '/host' ? (
+              formatDisplayPath(dirPath)
+            ) : currentBrowseDir && currentBrowseDir !== '/host' ? (
+              formatDisplayPath(currentBrowseDir)
+            ) : (
+              <span style={{ color: '#888888', fontStyle: 'italic' }}>None selected (choose a folder below)</span>
             )}
           </span>
         </div>
+
+        {/* Workspaces History Section (previous opened projects, max 3 with Show More) */}
+        {recentWorkspaces.length > 0 && (
+          <div className="picker-workspaces-section">
+            <div className="picker-workspaces-header">
+              <span className="picker-workspaces-label">Workspaces:</span>
+              <span className="picker-workspaces-subtitle">Previous opened projects</span>
+            </div>
+            <div className="picker-workspaces-list">
+              {displayedWorkspaces.map((ws) => {
+                const isSelected = dirPath === ws.path;
+                return (
+                  <div
+                    key={ws.path}
+                    className={`picker-workspace-item ${isSelected ? 'picker-workspace-item-selected' : ''}`}
+                    onClick={() => {
+                      setDirPath(ws.path);
+                      setPathInput(ws.path.startsWith('/host/') ? `~/${ws.path.slice(6)}` : ws.path);
+                      loadDirectory(ws.path);
+                    }}
+                    onDoubleClick={() => {
+                      onSelect(ws.path, showProjectName ? projectName.trim() : undefined);
+                    }}
+                    title={ws.path}
+                  >
+                    <div className="picker-workspace-info">
+                      <Folder size={14} className="picker-workspace-icon" />
+                      <span className="picker-workspace-name">{ws.name}</span>
+                      <span className="picker-workspace-path truncate">{formatDisplayPath(ws.path)}</span>
+                    </div>
+                    <div className="picker-workspace-actions">
+                      <button
+                        type="button"
+                        className="picker-workspace-open-btn"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onSelect(ws.path, showProjectName ? projectName.trim() : undefined);
+                        }}
+                        title="Open this workspace"
+                      >
+                        Open &rarr;
+                      </button>
+                      <button
+                        type="button"
+                        className="picker-workspace-delete-btn"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleDeleteWorkspace(ws.path);
+                        }}
+                        title="Remove from history"
+                      >
+                        <Trash2 size={13} />
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            {recentWorkspaces.length > 3 && (
+              <button
+                type="button"
+                className="picker-workspaces-toggle-btn"
+                onClick={() => setShowAllWorkspaces(!showAllWorkspaces)}
+              >
+                {showAllWorkspaces ? (
+                  <>
+                    <ChevronUp size={13} />
+                    <span>Show less</span>
+                  </>
+                ) : (
+                  <>
+                    <ChevronDown size={13} />
+                    <span>Show more ({recentWorkspaces.length - 3} more)</span>
+                  </>
+                )}
+              </button>
+            )}
+          </div>
+        )}
 
         {/* Project Name Field (for New Projects) */}
         {showProjectName && (

@@ -1,5 +1,6 @@
 import fs from 'fs/promises';
 import path from 'path';
+import os from 'os';
 import { WorkspaceContext } from '../../src/context/workspaceContext.js';
 
 // --- Types ---
@@ -12,6 +13,12 @@ export interface WorkspaceState {
   initialized: boolean;
 }
 
+export interface RecentWorkspace {
+  path: string;
+  name: string;
+  lastOpened: number;
+}
+
 // --- Workspace Manager ---
 class WorkspaceManager {
   private state: WorkspaceState = {
@@ -20,6 +27,9 @@ class WorkspaceManager {
     type: null,
     initialized: false,
   };
+  private recentWorkspacesFile = path.join(os.homedir(), '.ai-native-editor', 'recent_workspaces.json');
+  private recentWorkspaces: RecentWorkspace[] = [];
+  private recentLoaded = false;
 
   getState(): WorkspaceState {
     return { ...this.state };
@@ -27,6 +37,95 @@ class WorkspaceManager {
 
   isActive(): boolean {
     return this.state.path !== null && this.state.initialized;
+  }
+
+  async getRecentWorkspaces(): Promise<RecentWorkspace[]> {
+    if (!this.recentLoaded) {
+      await this.loadRecentWorkspaces();
+    }
+    return [...this.recentWorkspaces];
+  }
+
+  async loadRecentWorkspaces(): Promise<void> {
+    try {
+      const content = await fs.readFile(this.recentWorkspacesFile, 'utf-8');
+      const data = JSON.parse(content);
+      if (Array.isArray(data)) {
+        this.recentWorkspaces = data.filter(
+          item => item && typeof item.path === 'string' && typeof item.name === 'string' && item.path !== '/app' && item.path !== '/' && !WorkspaceContext.isAgentRoot(item.path)
+        );
+      }
+    } catch {
+      this.recentWorkspaces = [];
+    }
+    this.recentLoaded = true;
+
+    // Seed with current project or known existing project if empty
+    if (this.recentWorkspaces.length === 0) {
+      const candidates = [
+        '/host/Desktop/projects/personal/Soveren',
+        '/host/Desktop/projects/personal',
+      ];
+      for (const c of candidates) {
+        try {
+          const st = await fs.stat(c);
+          if (st.isDirectory()) {
+            this.recentWorkspaces.push({
+              path: c,
+              name: path.basename(c),
+              lastOpened: Date.now(),
+            });
+            break;
+          }
+        } catch {}
+      }
+      if (this.recentWorkspaces.length > 0) {
+        await this.saveRecentWorkspaces();
+      }
+    }
+  }
+
+  async addRecentWorkspace(dirPath: string): Promise<RecentWorkspace[]> {
+    const resolved = path.resolve(dirPath);
+    if (WorkspaceContext.isAgentRoot(resolved)) return this.getRecentWorkspaces();
+
+    if (!this.recentLoaded) {
+      await this.loadRecentWorkspaces();
+    }
+
+    const name = path.basename(resolved);
+    this.recentWorkspaces = this.recentWorkspaces.filter(ws => ws.path !== resolved);
+    this.recentWorkspaces.unshift({
+      path: resolved,
+      name,
+      lastOpened: Date.now(),
+    });
+    if (this.recentWorkspaces.length > 20) {
+      this.recentWorkspaces = this.recentWorkspaces.slice(0, 20);
+    }
+    await this.saveRecentWorkspaces();
+    return [...this.recentWorkspaces];
+  }
+
+  async removeRecentWorkspace(dirPath: string): Promise<RecentWorkspace[]> {
+    if (!this.recentLoaded) {
+      await this.loadRecentWorkspaces();
+    }
+    const resolved = path.resolve(dirPath);
+    this.recentWorkspaces = this.recentWorkspaces.filter(
+      ws => ws.path !== resolved && ws.path !== dirPath && path.resolve(ws.path) !== resolved
+    );
+    await this.saveRecentWorkspaces();
+    return [...this.recentWorkspaces];
+  }
+
+  private async saveRecentWorkspaces(): Promise<void> {
+    try {
+      await fs.mkdir(path.dirname(this.recentWorkspacesFile), { recursive: true });
+      await fs.writeFile(this.recentWorkspacesFile, JSON.stringify(this.recentWorkspaces, null, 2), 'utf-8');
+    } catch (err) {
+      console.warn('[WorkspaceManager] Failed to save recent workspaces:', err);
+    }
   }
 
   async select(dirPath: string): Promise<WorkspaceState> {
@@ -45,6 +144,7 @@ class WorkspaceManager {
     };
 
     WorkspaceContext.setWorkspace(resolved, name);
+    await this.addRecentWorkspace(resolved);
     return this.getState();
   }
 
@@ -82,6 +182,7 @@ class WorkspaceManager {
     };
 
     WorkspaceContext.setWorkspace(projectPath, safeName);
+    await this.addRecentWorkspace(projectPath);
     return this.getState();
   }
 

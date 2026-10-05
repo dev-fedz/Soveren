@@ -86,9 +86,8 @@ export class WorkflowRouter {
         break;
     }
 
-    // If activeModel is provided and this phase did not have an explicit custom assignment
-    // (or was left on a default placeholder), use the user's activeModel!
-    if (activeModel && (!hasExplicitConfig || resolved === 'gemma4:31b-cloud' || (resolved === 'qwen2.5-coder:7b' && activeModel !== 'qwen2.5-coder:7b' && !activeModel.includes('qwen2.5-coder')))) {
+    // If activeModel is provided and this phase did not resolve to any model, use activeModel as fallback
+    if (!resolved && activeModel) {
       resolved = activeModel;
     }
 
@@ -110,9 +109,12 @@ export class WorkflowRouter {
 
       let modelId = this.resolveModelForPhase(phase, routing, config.activeModel);
 
-      // Sanitize placeholder models that cannot be run directly in cloud or need fallback
-      if (modelId === 'gemma4:31b-cloud' || modelId === 'ollama-claude' || modelId === 'claude') {
-        modelId = config.activeModel && config.activeModel !== modelId ? config.activeModel : 'qwen2.5-coder:14b';
+      // Sanitize placeholder models that cannot be run directly without API credentials
+      if (modelId === 'ollama-claude' || modelId === 'claude') {
+        const hasAnthropicKey = !!(await CredentialStore.getApiKey('anthropic')) || !!process.env.ANTHROPIC_API_KEY;
+        if (!hasAnthropicKey) {
+          modelId = config.activeModel && config.activeModel !== modelId ? config.activeModel : 'qwen2.5-coder:14b';
+        }
       }
 
       // Try creating provider for assigned model

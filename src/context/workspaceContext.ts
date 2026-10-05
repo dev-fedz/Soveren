@@ -144,6 +144,10 @@ export class WorkspaceContext {
     if (root) {
       return path.resolve(root, relativePath);
     }
+    const cwdCandidate = path.resolve(process.cwd(), relativePath);
+    if (fs.existsSync(cwdCandidate)) {
+      return cwdCandidate;
+    }
     const defaultBase = this.isDocker ? '/host' : process.cwd();
     return path.resolve(defaultBase, relativePath);
   }

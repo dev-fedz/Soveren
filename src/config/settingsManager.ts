@@ -227,7 +227,7 @@ export const DEFAULT_PROVIDERS: Record<ProviderId, ProviderConfig> = {
   ollama: {
     id: 'ollama',
     name: 'Ollama (Local)',
-    endpoint: 'http://localhost:11434',
+    endpoint: process.env.OLLAMA_HOST || 'http://localhost:11434',
     authType: 'local',
     enabled: true,
     status: 'connected',

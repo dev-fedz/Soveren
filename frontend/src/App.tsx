@@ -308,7 +308,7 @@ export default function AIIDE() {
     fetchWorkspace,
   } = useWorkspace();
 
-  const getWorkspaceKey = useCallback((p: string | null) => (p ? `proj:${p}` : 'global'), []);
+  const getWorkspaceKey = useCallback((p: string | null | undefined) => (!p || p === '__global__' ? 'global' : `proj:${p}`), []);
 
   // Multi-workspace chat cache
   const [chatsByWorkspace, setChatsByWorkspace] = useState<Record<string, ChatMessage[]>>(() => {
@@ -585,12 +585,12 @@ export default function AIIDE() {
       const responseContent = (data.content && data.content.trim())
         ? data.content
         : 'The agent completed processing but did not produce a visible response. Please try again.';
-      const currentActivities = agentSessionRef.current?.activities
-        ? [...agentSessionRef.current.activities]
-        : undefined;
-      const currentChangedFiles = agentSessionRef.current?.changedFiles
-        ? [...agentSessionRef.current.changedFiles]
-        : undefined;
+      const currentActivities = (data.activities && data.activities.length > 0)
+        ? data.activities
+        : (agentSessionRef.current?.activities ? [...agentSessionRef.current.activities] : undefined);
+      const currentChangedFiles = (data.changedFiles && data.changedFiles.length > 0)
+        ? data.changedFiles
+        : (agentSessionRef.current?.changedFiles ? [...agentSessionRef.current.changedFiles] : undefined);
       addMessage(
         {
           role: 'agent',
@@ -974,7 +974,7 @@ export default function AIIDE() {
     });
     setAgentSession(null);
     setDiffViewFile(null);
-    setMessages(chatsByWorkspace['__global__'] || []);
+    setMessages(chatsByWorkspace['global'] || chatsByWorkspace['__global__'] || []);
     try {
       await axios.post(`${API}/ai/agent/reset`, { workspace: '__global__' });
       const sock = socketRef.current || getSocket();
@@ -1011,6 +1011,18 @@ export default function AIIDE() {
           type: 'response',
         });
       }
+
+      // Record in recent workspaces
+      try {
+        const finalPath = (pickerMode === 'new' && projectName) ? `${dirPath}/${projectName}` : dirPath;
+        const stored = localStorage.getItem('ai_native_recent_workspaces');
+        const list = stored ? JSON.parse(stored) : [];
+        const name = finalPath.split('/').filter(Boolean).pop() || finalPath;
+        const next = [{ path: finalPath, name, lastOpened: Date.now() }, ...list.filter((w: any) => w.path !== finalPath)].slice(0, 20);
+        localStorage.setItem('ai_native_recent_workspaces', JSON.stringify(next));
+        axios.post(`${API}/workspace/recent`, { path: finalPath }).catch(() => {});
+      } catch { /* ignore */ }
+
       setPickerOpen(false);
       loadProjectStructure();
     } catch (err: any) {

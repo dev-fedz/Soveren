@@ -19,7 +19,11 @@ export class ModelCatalog {
   private static cachedOllamaModels: ModelProfile[] = [];
   private static lastOllamaCheck = 0;
 
-  static async fetchOllamaModels(endpoint = 'http://localhost:11434'): Promise<ModelProfile[]> {
+  static async fetchOllamaModels(endpoint?: string): Promise<ModelProfile[]> {
+    let host = endpoint;
+    if (!host || ((host.includes('localhost') || host.includes('127.0.0.1')) && process.env.OLLAMA_HOST)) {
+      host = process.env.OLLAMA_HOST;
+    }
     const now = Date.now();
     // Cache for 15 seconds to avoid spamming local endpoint
     if (this.cachedOllamaModels.length > 0 && now - this.lastOllamaCheck < 15000) {
@@ -29,7 +33,7 @@ export class ModelCatalog {
     try {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 2000);
-      const res = await fetch(`${endpoint.replace(/\/$/, '')}/api/tags`, {
+      const res = await fetch(`${host.replace(/\/$/, '')}/api/tags`, {
         signal: controller.signal,
       });
       clearTimeout(timeoutId);

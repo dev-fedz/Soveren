@@ -192,6 +192,8 @@ export interface CachedMessage {
   content: string;
   type?: 'step' | 'response' | 'error';
   timestamp?: number;
+  activities?: any[];
+  changedFiles?: any[];
 }
 
 const chatMemoryCache = new Map<string, CachedMessage[]>();
@@ -346,7 +348,7 @@ app.post('/workspace/pick-native', async (req, res) => {
         cancelled: true,
         path: null,
         isDocker: true,
-        message: 'Native system file dialog is not accessible from inside Docker. Please browse mounted folders (/host, /projects, /app) below.',
+        message: 'Native system file dialog is not accessible from inside Docker. Please browse your local machine folders below.',
       });
     }
 
@@ -379,57 +381,82 @@ app.post('/workspace/pick-native', async (req, res) => {
   }
 });
 
+app.get('/workspace/recent', async (req, res) => {
+  try {
+    const recent = await workspaceManager.getRecentWorkspaces();
+    res.json({ recent });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/workspace/recent', async (req, res) => {
+  try {
+    const { path: wsPath } = req.body;
+    if (!wsPath) {
+      return res.status(400).json({ error: 'path is required' });
+    }
+    const resolvedPath = toContainerPath(wsPath);
+    const recent = await workspaceManager.addRecentWorkspace(resolvedPath);
+    res.json({ recent });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete('/workspace/recent', async (req, res) => {
+  try {
+    const wsPath = (req.body?.path || req.query?.path) as string;
+    if (!wsPath) {
+      return res.status(400).json({ error: 'path is required' });
+    }
+    const resolvedPath = toContainerPath(wsPath);
+    await workspaceManager.removeRecentWorkspace(resolvedPath);
+    if (resolvedPath !== wsPath) {
+      await workspaceManager.removeRecentWorkspace(wsPath);
+    }
+    const recent = await workspaceManager.getRecentWorkspaces();
+    res.json({ success: true, recent });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.get('/workspace/browse', async (req, res) => {
   try {
     const isDocker = fsSync.existsSync('/.dockerenv') || !!process.env.DOCKER;
     const requestedDir = req.query.dir as string;
+    const hostRoot = isDocker ? '/host' : os.homedir();
 
     // Resolve target directory with intelligent defaults and path translation
     let resolved: string;
     if (requestedDir) {
       const translated = toContainerPath(requestedDir);
       resolved = path.resolve(translated);
+
+      // SECURITY & WORKSPACE BOUNDARY: Never allow browsing into container root (/) or the agent app repo (/app)
+      if (isDocker) {
+        if (resolved === '/' || resolved === '/app' || !resolved.startsWith('/host') || WorkspaceContext.isAgentRoot(resolved)) {
+          resolved = hostRoot;
+        }
+      } else if (WorkspaceContext.isAgentRoot(resolved)) {
+        resolved = hostRoot;
+      }
     } else {
-      // Default directory when none provided
+      // Default directory when none provided: ALWAYS default to Local Machine (/host in Docker, homedir outside)
       const currentWs = workspaceManager.isActive() ? workspaceManager.getState().path : null;
-      if (await dirExists(currentWs)) {
-        resolved = currentWs!;
-      } else if (isDocker && await dirExists('/host/Desktop/projects')) {
-        resolved = '/host/Desktop/projects';
-      } else if (isDocker && await dirExists('/projects')) {
-        resolved = '/projects';
-      } else if (isDocker && await dirExists('/host/Desktop')) {
-        resolved = '/host/Desktop';
-      } else if (isDocker && await dirExists('/host')) {
-        resolved = '/host';
-      } else if (await dirExists(os.homedir())) {
-        resolved = os.homedir();
+      if (currentWs && (await dirExists(currentWs)) && (!isDocker || currentWs.startsWith('/host'))) {
+        resolved = currentWs;
       } else {
-        resolved = isDocker ? '/host' : path.resolve('.');
+        resolved = hostRoot;
       }
     }
 
-    // Verify if directory actually exists; if not, fall back gracefully
+    // Verify if directory actually exists; if not, fall back gracefully to hostRoot
     if (!await dirExists(resolved)) {
-      const fallbacks = [
-        path.dirname(resolved),
-        isDocker ? '/host' : null,
-        isDocker ? '/projects' : null,
-        workspaceManager.isActive() ? workspaceManager.getState().path : null,
-        os.homedir(),
-        '/'
-      ].filter(Boolean) as string[];
-
-      let found = false;
-      for (const fb of fallbacks) {
-        if (await dirExists(fb)) {
-          resolved = fb;
-          found = true;
-          break;
-        }
-      }
-
-      if (!found) {
+      if (await dirExists(hostRoot)) {
+        resolved = hostRoot;
+      } else {
         return res.status(404).json({ error: `Directory not found: ${requestedDir}` });
       }
     }
@@ -446,51 +473,37 @@ app.get('/workspace/browse', async (req, res) => {
       }
       if (!isDir) continue;
       if (entry.name.startsWith('.')) continue;
-      if (['node_modules', 'Library', 'Applications', 'System', 'tmp'].includes(entry.name)) continue;
+      // Filter out system, temp, and agent root directories
+      if (['node_modules', 'Library', 'Applications', 'System', 'tmp', '.Trash', 'boot', 'dev', 'etc', 'proc', 'sys', 'run', 'var', 'bin', 'sbin', 'lib', 'app'].includes(entry.name)) continue;
+      const entryPath = path.join(resolved, entry.name);
+      if (WorkspaceContext.isAgentRoot(entryPath)) continue;
+
       directories.push({
         name: entry.name,
-        path: path.join(resolved, entry.name),
+        path: entryPath,
       });
     }
 
     directories.sort((a, b) => a.name.localeCompare(b.name));
 
-    const parentDir = path.dirname(resolved);
-    const hasParent = parentDir !== resolved;
+    // When at host root (/host in Docker, or homedir on native), do not allow going up to container root
+    const isAtRoot = (isDocker && resolved === '/host') || (!isDocker && resolved === os.homedir());
+    const parentDir = isAtRoot ? null : path.dirname(resolved);
 
-    // Build list of valid, existing shortcuts (portable across any machine and Docker)
-    const shortcuts: { label: string; path: string; icon: string }[] = [];
-    const candidates: { label: string; path: string; icon: string }[] = [];
+    // Only show "Local Machine" shortcut - static shortcuts (desktop, projects, documents) removed as requested
+    const shortcuts: { label: string; path: string; icon: string }[] = [
+      { label: 'Local Machine', path: hostRoot, icon: 'home' }
+    ];
 
-    if (isDocker) {
-      candidates.push(
-        { label: 'Local Machine', path: '/host', icon: 'home' },
-        { label: 'Desktop', path: '/host/Desktop', icon: 'desktop' },
-        { label: 'Desktop Projects', path: '/host/Desktop/projects', icon: 'projects' },
-        { label: 'Projects', path: '/projects', icon: 'projects' },
-        { label: 'Documents', path: '/host/Documents', icon: 'projects' },
-      );
-    } else {
-      candidates.push(
-        { label: 'Projects', path: path.join(os.homedir(), 'Desktop', 'projects'), icon: 'projects' },
-        { label: 'Desktop', path: path.join(os.homedir(), 'Desktop'), icon: 'desktop' },
-        { label: 'Documents', path: path.join(os.homedir(), 'Documents'), icon: 'projects' },
-        { label: 'Home', path: os.homedir(), icon: 'home' },
-      );
-    }
-
-    for (const c of candidates) {
-      if (await dirExists(c.path) && !shortcuts.some(s => s.path === c.path)) {
-        shortcuts.push(c);
-      }
-    }
+    const recentWorkspaces = await workspaceManager.getRecentWorkspaces();
 
     res.json({
       current: resolved,
-      parent: hasParent ? parentDir : null,
-      home: isDocker ? '/host' : os.homedir(),
+      parent: parentDir,
+      home: hostRoot,
       directories,
       shortcuts,
+      recentWorkspaces,
       isDocker,
     });
   } catch (error: any) {
@@ -879,6 +892,16 @@ app.post('/ai/credentials', async (req, res) => {
     }
     await CredentialStore.setApiKey(providerId as ProviderId, apiKey || '');
     const masked = CredentialStore.maskKey(apiKey);
+
+    try {
+      const config = await SettingsManager.getGlobalConfig();
+      const updatedProvider = await ProviderRegistry.createProviderForModel(config.activeModel);
+      agent.setProvider(updatedProvider);
+      console.log(`[Credentials Updated] Successfully updated active agent provider for ${config.activeModel}`);
+    } catch (pErr: any) {
+      console.warn('[Credentials Updated] Could not update active provider immediately:', pErr?.message || pErr);
+    }
+
     res.json({ success: true, providerId, masked });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
@@ -889,6 +912,13 @@ app.delete('/ai/credentials/:provider', async (req, res) => {
   try {
     const providerId = req.params.provider as ProviderId;
     await CredentialStore.deleteApiKey(providerId);
+
+    try {
+      const config = await SettingsManager.getGlobalConfig();
+      const updatedProvider = await ProviderRegistry.createProviderForModel(config.activeModel);
+      agent.setProvider(updatedProvider);
+    } catch {}
+
     res.json({ success: true, providerId });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
@@ -1489,8 +1519,12 @@ io.on('connection', (socket) => {
         ? response
         : 'I processed your request but was unable to generate a response. Please try rephrasing your request or providing more details.';
 
-      appendChatMessage({ role: 'agent', content: safeResponse, type: 'response' }, activeWorkspaceKey);
-      socket.emit('agent_response', { content: safeResponse, workspace: activeWorkspaceKey });
+      const session = globalActivityTracker.getSession();
+      const activities = session.activities && session.activities.length > 0 ? [...session.activities] : undefined;
+      const changedFiles = session.changedFiles && session.changedFiles.length > 0 ? [...session.changedFiles] : undefined;
+
+      appendChatMessage({ role: 'agent', content: safeResponse, type: 'response', activities, changedFiles }, activeWorkspaceKey);
+      socket.emit('agent_response', { content: safeResponse, workspace: activeWorkspaceKey, activities, changedFiles });
 
       // Signal explorer refresh after project changes (Section 20)
       if (workspace.path) {
@@ -1500,10 +1534,12 @@ io.on('connection', (socket) => {
       console.error('[Socket message] Agent processing error:', error);
       const activeWorkspaceKey = workspaceManager.isActive() ? (workspaceManager.getState().path || '__global__') : '__global__';
       const errorMessage = `An error occurred while processing your request: ${error.message || 'Unknown error'}`;
-      appendChatMessage({ role: 'system', content: errorMessage, type: 'error' }, activeWorkspaceKey);
+      const session = globalActivityTracker.getSession();
+      const activities = session.activities && session.activities.length > 0 ? [...session.activities] : undefined;
+      appendChatMessage({ role: 'system', content: errorMessage, type: 'error', activities }, activeWorkspaceKey);
       socket.emit('error', { message: error.message || 'Unknown error' });
       // Also emit an agent_response so the UI doesn't show a blank bubble
-      socket.emit('agent_response', { content: errorMessage, workspace: activeWorkspaceKey });
+      socket.emit('agent_response', { content: errorMessage, workspace: activeWorkspaceKey, activities });
     }
   });
 

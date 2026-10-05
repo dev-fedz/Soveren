@@ -5,6 +5,7 @@ import { ActivityTracker } from '../src/agent/activityTracker';
 import { WorkflowRouter } from '../src/agent/workflowRouter';
 import { settingsManager } from '../src/config/settingsManager';
 import { Agent } from '../src/agent/agent';
+import { WorkspaceContext } from '../src/context/workspaceContext';
 
 const TEST_DIR = path.resolve(process.cwd(), 'tmp_test_workflow');
 

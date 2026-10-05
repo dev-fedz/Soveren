@@ -214,11 +214,26 @@ export class GoogleGeminiProvider implements LLMProvider {
     );
   }
 
+  private isRecoverableError(msg?: string): boolean {
+    if (!msg) return false;
+    return msg.includes('not found') ||
+      msg.includes('404') ||
+      msg.includes('INVALID_ARGUMENT') ||
+      msg.includes('503') ||
+      msg.includes('UNAVAILABLE') ||
+      msg.includes('high demand') ||
+      msg.includes('429') ||
+      msg.includes('RESOURCE_EXHAUSTED') ||
+      msg.includes('quota') ||
+      msg.includes('rate limit');
+  }
+
   async chat(messages: Message[]): Promise<LLMResponse> {
     try {
       return await this.primaryProvider.chat(messages);
     } catch (err: any) {
-      if (err.message && (err.message.includes('not found') || err.message.includes('404') || err.message.includes('INVALID_ARGUMENT'))) {
+      if (this.isRecoverableError(err?.message)) {
+        console.warn(`[GoogleGeminiProvider] Primary model ${this.modelName} unavailable, falling back to gemini-2.5-flash`);
         const fallback = new OpenAICompatibleProvider(
           'https://generativelanguage.googleapis.com/v1beta/openai',
           this.apiKey,
@@ -239,7 +254,8 @@ export class GoogleGeminiProvider implements LLMProvider {
     try {
       return await this.primaryProvider.chatStream(messages, onChunk, onThinking);
     } catch (err: any) {
-      if (err.message && (err.message.includes('not found') || err.message.includes('404') || err.message.includes('INVALID_ARGUMENT'))) {
+      if (this.isRecoverableError(err?.message)) {
+        console.warn(`[GoogleGeminiProvider] Primary model ${this.modelName} unavailable, falling back to gemini-2.5-flash`);
         const fallback = new OpenAICompatibleProvider(
           'https://generativelanguage.googleapis.com/v1beta/openai',
           this.apiKey,
@@ -263,7 +279,10 @@ export class ProviderRegistry {
       const keyToUse = apiKey || (await CredentialStore.getApiKey(providerId)) || (providerId === 'google' ? (process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY) : undefined);
 
       if (providerId === 'ollama') {
-        const ep = endpoint || 'http://localhost:11434';
+        let ep = endpoint;
+        if (!ep || ((ep.includes('localhost') || ep.includes('127.0.0.1')) && process.env.OLLAMA_HOST)) {
+          ep = process.env.OLLAMA_HOST;
+        }
         const res = await fetch(`${ep.replace(/\/$/, '')}/api/tags`, {
           signal: AbortSignal.timeout(3000),
         });
@@ -354,7 +373,7 @@ export class ProviderRegistry {
     const model = await ModelCatalog.getModelById(modelId);
     if (!model) {
       let raw = modelId.replace(/^ollama-/, '');
-      if (raw === 'claude' || raw === 'gemma4:31b-cloud') {
+      if (raw === 'claude') {
         raw = 'qwen2.5-coder:14b';
       }
       return new OllamaProvider(raw);
@@ -362,7 +381,7 @@ export class ProviderRegistry {
 
     if (model.providerId === 'ollama') {
       let rawModelName = model.id.startsWith('ollama-') ? model.id.replace('ollama-', '') : model.id;
-      if (rawModelName === 'claude' || rawModelName === 'gemma4:31b-cloud') {
+      if (rawModelName === 'claude') {
         rawModelName = 'qwen2.5-coder:14b';
       }
       return new OllamaProvider(rawModelName);

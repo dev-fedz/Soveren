@@ -434,6 +434,7 @@ Browser & Dev Server Awareness:
     const executedTools: string[] = [];
     let iterations = 0;
     const MAX_ITERATIONS = 20;
+    let lastProviderError: Error | null = null;
 
     while (iterations < MAX_ITERATIONS) {
       if (globalActivityTracker.isAborted()) {
@@ -551,10 +552,10 @@ Browser & Dev Server Awareness:
         let rawContent = '';
         let streamedThinking = '';
         let lastLiveUpdate = Date.now();
-        let lastProviderError: Error | null = null;
+        lastProviderError = null;
 
-        // Use active configured provider if available, otherwise routed provider
-        const activeProvider = this.provider || currentReasonRouted.provider;
+        // Use routed provider for the active phase, otherwise fall back to agent provider
+        const activeProvider = currentReasonRouted.provider || this.provider;
 
         const handleLiveThoughtUpdate = (liveText: string) => {
           const now = Date.now();
@@ -622,6 +623,9 @@ Browser & Dev Server Awareness:
             }
           } catch (innerErr: any) {
             console.error('[Agent] Local fallback also failed:', innerErr?.message || innerErr);
+            if (!lastProviderError) {
+              lastProviderError = innerErr;
+            }
           }
         }
 
@@ -630,7 +634,7 @@ Browser & Dev Server Awareness:
 
         if (!actualReasoning || actualReasoning.length < 15) {
           try {
-            const reasonProvider = this.provider || currentReasonRouted.provider;
+            const reasonProvider = currentReasonRouted.provider || this.provider;
             const detectedCall = this.detectToolCall(rawContent);
             const actionDesc = detectedCall ? `invoking tool "${detectedCall.name}"` : 'responding to the user';
             const reasonPrompt: Message[] = [
